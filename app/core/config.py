@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     fuzzy_match_limit: int = Field(default=5, ge=1, le=20)
     medicine_aliases: dict[str, str] = Field(default_factory=dict)
 
+    # Comma-separated browser origins allowed to call the API cross-origin,
+    # e.g. "https://medicalai.softgoway.com". Empty disables CORS entirely.
+    cors_allowed_origins: str = ""
+
     dashboard_enabled: bool = False
     dashboard_token: str = ""
 

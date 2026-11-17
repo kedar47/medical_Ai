@@ -1,0 +1,95 @@
+# Rendered by deploy/setup_vps.sh with envsubst. Do not edit the rendered copy
+# in /etc/nginx by hand; edit this template and re-run the script.
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# ---------------------------------------------------------------------------
+# Dashboard: https://${FRONTEND_DOMAIN}
+# Static React build + same-origin /api proxy. The proxy adds the private
+# dashboard token server-side, so it never reaches the browser bundle.
+# The whole site sits behind a demo password (HTTP basic auth).
+# ---------------------------------------------------------------------------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${FRONTEND_DOMAIN};
+
+    root /var/www/medicalai;
+    index index.html;
+
+    auth_basic "Medical AI demo";
+    auth_basic_user_file /etc/nginx/medicalai.htpasswd;
+
+    client_max_body_size 12m;
+    proxy_read_timeout 180s;
+    proxy_send_timeout 180s;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy same-origin always;
+
+    location /api/dashboard/ {
+        proxy_pass http://127.0.0.1:${API_PORT}/dashboard/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization "Bearer ${DASHBOARD_TOKEN}";
+    }
+
+    location = /api/telephony/mock/incoming {
+        proxy_pass http://127.0.0.1:${API_PORT}/telephony/mock/incoming;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization "Bearer ${TELEPHONY_MONITOR_TOKEN}";
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:${API_PORT}/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Never forward the basic-auth password to the API.
+        proxy_set_header Authorization "";
+    }
+
+    location /assets/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Public API: https://${API_DOMAIN}
+# Swagger docs at /docs, Exotel webhooks and the /telephony/media WebSocket.
+# Dashboard routes here still require the bearer token.
+# ---------------------------------------------------------------------------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${API_DOMAIN};
+
+    client_max_body_size 12m;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    location / {
+        proxy_pass http://127.0.0.1:${API_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

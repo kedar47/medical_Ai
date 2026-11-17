@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Medicine Voice Demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7f4;
+      --panel: #ffffff;
+      --ink: #183228;
+      --muted: #63736b;
+      --line: #d8e2dc;
+      --accent: #0f766e;
+      --accent-dark: #0b5c56;
+      --warn: #b45309;
+      --error: #b91c1c;
+      --soft: #eef6f2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #d9efe5, transparent 34rem),
+        var(--bg);
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1.2rem clamp(1rem, 4vw, 3rem);
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.82);
+      backdrop-filter: blur(10px);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    h1 { font-size: clamp(1.1rem, 2vw, 1.45rem); margin: 0; }
+    h2 { font-size: 1rem; margin: 0 0 0.8rem; }
+    .badges { display: flex; gap: 0.45rem; flex-wrap: wrap; }
+    .badge {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0.28rem 0.62rem;
+      font-size: 0.74rem;
+      color: var(--muted);
+      background: #fff;
+      white-space: nowrap;
+    }
+    .badge.ready { color: var(--accent-dark); border-color: #93c9bc; background: #ecfdf5; }
+    .badge.error { color: var(--error); border-color: #fecaca; background: #fef2f2; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) minmax(18rem, 0.8fr);
+      gap: 1rem;
+      padding: 1rem clamp(1rem, 4vw, 3rem) 2rem;
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 14px 40px rgba(24, 50, 40, 0.06);
+    }
+    .setup { padding: 1rem; margin-bottom: 1rem; }
+    .setup-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 0.8fr auto;
+      gap: 0.65rem;
+      align-items: end;
+    }
+    label { display: block; font-size: 0.76rem; color: var(--muted); margin-bottom: 0.3rem; }
+    input, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.62rem 0.7rem;
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+    }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.62rem 0.82rem;
+      font: inherit;
+      font-weight: 600;
+      color: var(--ink);
+      background: #fff;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: var(--soft); }
+    button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+    button.primary:hover:not(:disabled) { background: var(--accent-dark); }
+    button.danger { color: var(--error); }
+    button.recording { color: #fff; background: var(--error); border-color: var(--error); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .chat-panel { display: flex; flex-direction: column; min-height: 620px; overflow: hidden; }
+    .session-line {
+      padding: 0.72rem 1rem;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.78rem;
+      word-break: break-all;
+    }
+    .chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.8rem;
+      max-height: 460px;
+      min-height: 330px;
+    }
+    .message {
+      max-width: 88%;
+      padding: 0.72rem 0.85rem;
+      border-radius: 14px;
+      line-height: 1.48;
+      white-space: pre-wrap;
+      font-size: 0.93rem;
+    }
+    .message.user { align-self: flex-end; background: #dff4ec; border-bottom-right-radius: 4px; }
+    .message.assistant { align-self: flex-start; background: #f8faf9; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+    .message.system { align-self: center; background: #fff7ed; border: 1px solid #fed7aa; color: var(--warn); font-size: 0.8rem; }
+    .meta { display: block; color: var(--muted); font-size: 0.68rem; margin-top: 0.45rem; }
+    .composer { padding: 0.9rem 1rem 1rem; border-top: 1px solid var(--line); }
+    .composer-row { display: flex; gap: 0.55rem; align-items: center; }
+    .composer-row input[type="text"] { flex: 1; }
+    .composer-options {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: center;
+      margin-top: 0.55rem;
+      color: var(--muted);
+      font-size: 0.76rem;
+    }
+    .check { display: flex; gap: 0.35rem; align-items: center; }
+    .check input { width: auto; }
+    .side { display: flex; flex-direction: column; gap: 1rem; }
+    .box { padding: 1rem; }
+    .summary-list { display: flex; flex-direction: column; gap: 0.55rem; margin: 0; padding: 0; list-style: none; }
+    .summary-list li {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 0.65rem 0.72rem;
+      background: #fbfdfc;
+      font-size: 0.84rem;
+    }
+    .summary-list strong { display: block; }
+    .summary-list span { color: var(--muted); font-size: 0.76rem; }
+    .empty { color: var(--muted); font-size: 0.84rem; margin: 0; }
+    .order-box {
+      margin-top: 0.75rem;
+      padding: 0.7rem;
+      border-radius: 12px;
+      background: #ecfdf5;
+      border: 1px solid #a7d8c8;
+      font-size: 0.82rem;
+      word-break: break-all;
+    }
+    .candidates { margin-top: 0.6rem; display: flex; flex-direction: column; gap: 0.35rem; }
+    .candidate {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 0.45rem 0.55rem;
+      background: #fff;
+      font-size: 0.8rem;
+    }
+    .note { font-size: 0.75rem; color: var(--warn); margin-top: 0.45rem; }
+    .voice-controls { display: flex; gap: 0.55rem; flex-wrap: wrap; }
+    .hidden { display: none !important; }
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; }
+      .setup-grid { grid-template-columns: 1fr 1fr; }
+      .setup-grid button { width: 100%; }
+      .chat-panel { min-height: 540px; }
+      .chat { max-height: 370px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Medicine Voice Demo</h1>
+      <div class="badges" id="status-badges">
+        <span class="badge">Checking voice services...</span>
+      </div>
+    </div>
+    <div class="voice-controls">
+      <button id="end-session" class="danger" disabled>End session</button>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <div class="panel setup">
+        <div class="setup-grid">
+          <div>
+            <label for="customer-name">Customer name</label>
+            <input id="customer-name" type="text" maxlength="255" placeholder="Asha">
+          </div>
+          <div>
+            <label for="customer-phone">Phone (optional, E.164)</label>
+            <input id="customer-phone" type="text" placeholder="+919876543210">
+          </div>
+          <div>
+            <label for="session-language">Greeting language</label>
+            <select id="session-language">
+              <option value="hi">Hindi</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <button id="create-session" class="primary">Start session</button>
+        </div>
+      </div>
+
+      <div class="panel chat-panel">
+        <div class="session-line" id="session-line">No active voice session.</div>
+        <div class="chat" id="chat"></div>
+        <div class="composer">
+          <div class="composer-row">
+            <input id="text-input" type="text" placeholder="Type a request or use the microphone" disabled>
+            <button id="send-text" class="primary" disabled>Send</button>
+            <button id="record-audio" disabled>Record</button>
+          </div>
+          <div class="composer-options">
+            <span id="activity">Start a session to begin.</span>
+            <label class="check"><input id="speak-toggle" type="checkbox" checked> Speak replies</label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="panel box">
+        <h2>Current draft</h2>
+        <ul class="summary-list" id="summary-list"></ul>
+        <p class="empty" id="summary-empty">No items yet.</p>
+        <div class="order-box hidden" id="order-box"></div>
+      </div>
+      <div class="panel box">
+        <h2>Telephone demo</h2>
+        <p id="telephony-status" class="empty">Loading provider status…</p>
+        <label>Internal call ID <input id="monitor-call" placeholder="call_…"></label>
+        <label>Monitor token <input id="monitor-token" type="password" autocomplete="off"></label>
+        <button id="monitor-refresh">Refresh call</button>
+        <pre id="monitor-result" style="white-space:pre-wrap"></pre>
+      </div>
+      <div class="panel box">
+        <h2>Example requests</h2>
+        <p class="empty">Add two strips of BRUFEN</p>
+        <p class="empty">Show summary</p>
+        <p class="empty">Change last item to three strips</p>
+        <p class="empty">Remove last item</p>
+        <p class="empty">Confirm the order</p>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const state = {
+      voiceSessionId: null,
+      orderSessionId: null,
+      busy: false,
+      recorder: null,
+      chunks: [],
+      stream: null,
+    };
+
+    const chat = document.getElementById("chat");
+    const sessionLine = document.getElementById("session-line");
+    const statusBadges = document.getElementById("status-badges");
+    const summaryList = document.getElementById("summary-list");
+    const summaryEmpty = document.getElementById("summary-empty");
+    const orderBox = document.getElementById("order-box");
+    const textInput = document.getElementById("text-input");
+    const sendText = document.getElementById("send-text");
+    const recordAudio = document.getElementById("record-audio");
+    const createSession = document.getElementById("create-session");
+    const endSession = document.getElementById("end-session");
+    const activity = document.getElementById("activity");
+    const speakToggle = document.getElementById("speak-toggle");
+    const customerName = document.getElementById("customer-name");
+    const customerPhone = document.getElementById("customer-phone");
+    const sessionLanguage = document.getElementById("session-language");
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function setActivity(text) {
+      activity.textContent = text;
+    }
+
+    function setBusy(value) {
+      state.busy = value;
+      sendText.disabled = value || !state.voiceSessionId;
+      textInput.disabled = value || !state.voiceSessionId;
+      recordAudio.disabled = value || !state.voiceSessionId;
+      createSession.disabled = value;
+      endSession.disabled = value || !state.voiceSessionId;
+    }
+
+    function appendMessage(role, text, meta) {
+      const element = document.createElement("div");
+      element.className = `message ${role}`;
+      element.textContent = text;
+      if (meta) {
+        const note = document.createElement("span");
+        note.className = "meta";
+        note.textContent = meta;
+        element.appendChild(note);
+      }
+      chat.appendChild(element);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    async function requestJson(url, options = {}) {
+      const response = await fetch(url, options);
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = null;
+      }
+      if (!response.ok) {
+        let detail = payload && payload.detail ? payload.detail : `HTTP ${response.status}`;
+        if (Array.isArray(detail)) {
+          detail = detail.map((entry) => entry.msg || JSON.stringify(entry)).join("; ");
+        }
+        throw new Error(detail);
+      }
+      return payload;
+    }
+
+    async function loadStatus() {
+      try {
+        const status = await requestJson("/voice/status");
+        const entries = [
+          ["STT", status.stt],
+          ["TTS", status.tts],
+          ["LLM", status.llm],
+        ];
+        statusBadges.innerHTML = entries.map(([label, component]) => {
+          const variant = component.ready ? "ready" : "error";
+          return `<span class="badge ${variant}" title="${escapeHtml(component.detail)}">${label}: ${component.ready ? "ready" : "offline"}</span>`;
+        }).join("");
+        if (!status.enabled) {
+          appendMessage("system", "Voice features are disabled on the server.");
+        }
+      } catch (error) {
+        statusBadges.innerHTML = '<span class="badge error">Voice status unavailable</span>';
+      }
+    }
+
+    function renderSummary(summary) {
+      summaryList.innerHTML = "";
+      if (!summary || !summary.items || summary.items.length === 0) {
+        summaryEmpty.classList.remove("hidden");
+        orderBox.classList.add("hidden");
+        return;
+      }
+      summaryEmpty.classList.add("hidden");
+      orderBox.classList.add("hidden");
+      summary.items.forEach((item) => {
+        const element = document.createElement("li");
+        element.innerHTML = `<strong>${escapeHtml(item.medicine_name)}</strong><span>${escapeHtml(item.description)} - ${item.quantity} ${escapeHtml(item.unit)}</span>`;
+        summaryList.appendChild(element);
+      });
+      if (summary.message) {
+        const note = document.createElement("li");
+        note.textContent = summary.message;
+        summaryList.appendChild(note);
+      }
+    }
+
+    function renderCandidates(candidates) {
+      if (!candidates || candidates.length === 0) {
+        return null;
+      }
+      const wrapper = document.createElement("div");
+      wrapper.className = "candidates";
+      candidates.forEach((candidate) => {
+        const element = document.createElement("div");
+        element.className = "candidate";
+        element.textContent = `${candidate.ordinal}) ${candidate.medicine_name} ${candidate.description} [${candidate.medicine_id}]`;
+        wrapper.appendChild(element);
+      });
+      return wrapper;
+    }
+
+    function playAudio(base64) {
+      const audio = new Audio(`data:audio/wav;base64,${base64}`);
+      audio.play().catch(() => {
+        appendMessage("system", "Reply audio is ready but the browser blocked playback.");
+      });
+    }
+
+    function renderTurn(turn, includeTranscript) {
+      if (includeTranscript && turn.transcript) {
+        appendMessage("user", turn.transcript, "Transcribed from microphone");
+      }
+      const message = document.createElement("div");
+      message.className = "message assistant";
+      const text = document.createElement("div");
+      text.textContent = turn.assistant_text;
+      message.appendChild(text);
+      const candidates = renderCandidates(turn.candidates);
+      if (candidates) {
+        message.appendChild(candidates);
+      }
+      if (turn.tts_error) {
+        const note = document.createElement("div");
+        note.className = "note";
+        note.textContent = `Audio unavailable: ${turn.tts_error}`;
+        message.appendChild(note);
+      }
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = `intent: ${turn.intent} | language: ${turn.language}`;
+      message.appendChild(meta);
+      chat.appendChild(message);
+      chat.scrollTop = chat.scrollHeight;
+
+      if (turn.order_summary) {
+        renderSummary(turn.order_summary);
+      }
+      if (turn.order) {
+        orderBox.classList.remove("hidden");
+        orderBox.textContent = `Order confirmed: ${turn.order.order_id} (${turn.order.total_line_items} line items)`;
+      }
+      if (["CONFIRMED", "CANCELLED", "ENDED", "EXPIRED"].includes(turn.status)) {
+        state.voiceSessionId = null;
+        state.orderSessionId = null;
+        sessionLine.textContent = `${turn.status}. Start a fresh session for a new order.`;
+        createSession.textContent = "Start new order";
+      }
+      if (turn.tts && turn.tts.audio_base64) {
+        playAudio(turn.tts.audio_base64);
+      }
+    }
+
+    createSession.addEventListener("click", async () => {
+      setBusy(true);
+      setActivity("Starting voice session...");
+      summaryList.innerHTML = "";
+      summaryEmpty.classList.remove("hidden");
+      orderBox.classList.add("hidden");
+      try {
+        if (state.voiceSessionId) {
+          await requestJson(`/voice/sessions/${state.voiceSessionId}/end`, {method: "POST"});
+          state.voiceSessionId = null;
+        }
+        const session = await requestJson("/voice/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            customer_name: customerName.value.trim() || null,
+            customer_phone: customerPhone.value.trim() || null,
+            language: sessionLanguage.value,
+          }),
+        });
+        state.voiceSessionId = session.voice_session_id;
+        state.orderSessionId = session.order_session_id;
+        sessionLine.textContent = `Voice ${session.voice_session_id} | Order draft ${session.order_session_id} | ${session.status}`;
+        appendMessage("system", session.message);
+        setActivity("Session active. Type, speak, or record.");
+      } catch (error) {
+        appendMessage("system", `Could not start session: ${error.message}`);
+        setActivity("Session not started.");
+      } finally {
+        setBusy(false);
+        if (state.voiceSessionId) {
+          textInput.focus();
+        }
+      }
+    });
+
+    async function sendTurnText() {
+      const text = textInput.value.trim();
+      if (!text || !state.voiceSessionId || state.busy) {
+        return;
+      }
+      appendMessage("user", text);
+      textInput.value = "";
+      setBusy(true);
+      setActivity(speakToggle.checked ? "Thinking and generating voice..." : "Thinking...");
+      try {
+        const turn = await requestJson(`/voice/sessions/${state.voiceSessionId}/turns`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            speak: speakToggle.checked,
+          }),
+        });
+        renderTurn(turn, false);
+        setActivity("Ready for the next request.");
+      } catch (error) {
+        appendMessage("system", `Request failed: ${error.message}`);
+        setActivity("Ready to retry.");
+      } finally {
+        setBusy(false);
+        textInput.focus();
+      }
+    }
+
+    sendText.addEventListener("click", sendTurnText);
+    textInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        sendTurnText();
+      }
+    });
+
+    async function startRecording() {
+      if (!state.voiceSessionId || state.busy) {
+        return;
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        appendMessage("system", "Microphone recording is not supported in this browser.");
+        return;
+      }
+      try {
+        state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const types = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+        const mimeType = types.find((type) => window.MediaRecorder && MediaRecorder.isTypeSupported(type));
+        state.recorder = new MediaRecorder(state.stream, mimeType ? { mimeType } : undefined);
+        state.chunks = [];
+        state.recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            state.chunks.push(event.data);
+          }
+        };
+        state.recorder.onstop = sendRecordedAudio;
+        state.recorder.start();
+        recordAudio.textContent = "Stop";
+        recordAudio.classList.add("recording");
+        setActivity("Recording... press Stop to send.");
+      } catch (error) {
+        appendMessage("system", `Microphone unavailable: ${error.message}`);
+      }
+    }
+
+    function stopRecording() {
+      if (state.recorder && state.recorder.state !== "inactive") {
+        state.recorder.stop();
+      }
+    }
+
+    async function sendRecordedAudio() {
+      recordAudio.textContent = "Record";
+      recordAudio.classList.remove("recording");
+      if (state.stream) {
+        state.stream.getTracks().forEach((track) => track.stop());
+        state.stream = null;
+      }
+      const blob = new Blob(state.chunks, {
+        type: state.recorder && state.recorder.mimeType ? state.recorder.mimeType : "audio/webm",
+      });
+      state.chunks = [];
+      if (!blob.size || !state.voiceSessionId) {
+        return;
+      }
+      setBusy(true);
+      setActivity("Transcribing audio...");
+      const form = new FormData();
+      form.append("file", blob, "recording.webm");
+      form.append("speak", String(speakToggle.checked));
+      try {
+        const turn = await requestJson(`/voice/sessions/${state.voiceSessionId}/audio-turns`, {
+          method: "POST",
+          body: form,
+        });
+        renderTurn(turn, true);
+        setActivity("Ready for the next request.");
+      } catch (error) {
+        appendMessage("system", `Audio request failed: ${error.message}`);
+        setActivity("Ready to retry.");
+      } finally {
+        setBusy(false);
+        textInput.focus();
+      }
+    }
+
+    recordAudio.addEventListener("click", () => {
+      if (state.recorder && state.recorder.state === "recording") {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    });
+
+    endSession.addEventListener("click", async () => {
+      if (!state.voiceSessionId || state.busy) {
+        return;
+      }
+      setBusy(true);
+      setActivity("Ending session...");
+      try {
+        const session = await requestJson(`/voice/sessions/${state.voiceSessionId}/end`, {
+          method: "POST",
+        });
+        appendMessage("system", session.message);
+        state.voiceSessionId = null;
+        state.orderSessionId = null;
+        sessionLine.textContent = `Session ${session.voice_session_id} | ${session.status}`;
+        setActivity("Session ended. Start a new session to continue.");
+      } catch (error) {
+        appendMessage("system", `Could not end session: ${error.message}`);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    fetch("/telephony/status").then(r => r.json()).then(s => {
+      document.getElementById("telephony-status").textContent =
+        `${s.provider}: ${s.enabled ? "enabled" : "disabled"}; ${s.simulated ? "SIMULATED" : "live calling not verified"}`;
+    });
+    document.getElementById("monitor-refresh").addEventListener("click", async () => {
+      try {
+        const id = document.getElementById("monitor-call").value.trim();
+        const token = document.getElementById("monitor-token").value;
+        const result = await requestJson(id ? `/telephony/calls/${encodeURIComponent(id)}` : "/telephony/calls", {
+          headers: {Authorization: `Bearer ${token}`}
+        });
+        document.getElementById("monitor-result").textContent = JSON.stringify(result, null, 2);
+      } catch (e) { document.getElementById("monitor-result").textContent = e.message; }
+    });
+    loadStatus();
+    setBusy(false);
+  </script>
+</body>
+</html>

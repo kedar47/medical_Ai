@@ -1,0 +1,8 @@
+# Operator template only. Not activated. Keep real tunnel credentials private.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: C:\path\to\private-tunnel-credentials.json
+ingress:
+  - hostname: REPLACE_WITH_YOUR_HOST
+    path: ^/telephony/(media|status-callback)$
+    service: http://127.0.0.1:8001
+  - service: http_status:404

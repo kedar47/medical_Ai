@@ -1,0 +1,21 @@
+medicine_id,medicine_name,description,source_serial_number,source_row
+MED-00003,CLOMIN TAB,                              10'S,1,3
+MED-00004,CORFLAM AC,TAB                           10'S,2,4
+MED-00005,CORFLAM SP,TAB                           10'S,3,5
+MED-00006,CORFLAM,SUSP                             60ML,4,6
+MED-00007,CORFLAM,TAB                              15'S,5,7
+MED-00009,ANAFORTAN,SYP                            30ML,1,9
+MED-00010,ANAFORTAN,TAB                            15'S,2,10
+MED-00011,ARACHITOL,INJ 6L                         BOX,3,11
+MED-00012,ARACHITOL,NANO SUGAR FREE                BOX,4,12
+MED-00013,BRUFEN,200MG                             15'S,5,13
+MED-00014,BRUFEN,400MG                             15'S,6,14
+MED-00015,BRUFEN,600MG                             15'S,7,15
+MED-00016,CEROM 500,TAB                            10'S,8,16
+MED-00017,COLOSPA,RET CAP                          15's,9,17
+MED-00019,CREMA-ANO,20GM,11,19
+MED-00020,CREMADIET,+ POW                          100GM,12,20
+MED-00021,CREMAFFIN,MINT/PLAIN SYP                 225ML,13,21
+MED-00022,CREMAFFIN,MIXED FRUIT SYP                225ML,14,22
+MED-00023,CREMAFFIN,PLUS SYP                       225ML,15,23
+MED-00024,CREMAFINE,FRESH TAB                      1*S,16,24

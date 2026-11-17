@@ -1,0 +1,16 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+websockets==14.2
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3
+pydantic==2.10.4
+pydantic-settings==2.7.0
+openpyxl==3.1.5
+pytest==8.3.4
+httpx==0.28.1
+python-multipart==0.0.33
+faster-whisper==1.2.1
+av==16.0.0
+kokoro-onnx==0.6.1
+numpy==2.5.5
+rapidfuzz==3.14.6

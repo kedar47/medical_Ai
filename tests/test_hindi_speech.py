@@ -285,3 +285,52 @@ def test_looping_segment_is_dropped(monkeypatch):
     monkeypatch.setattr(adapter,'_get_model',lambda:Model())
     with pytest.raises(NoSpeechError):
         adapter.transcribe(_wav_seconds(2.0),filename='call.wav',language='hi')
+
+
+# Live call 2026-11-18 08:43: after "BRUFEN 200 MG 15S" the agent asked for the
+# quantity, and Whisper wrote the caller's "दो स्ट्रिप" as these.
+@pytest.mark.parametrize('answer', ['DOESTRIP','DOSCRIP','those strips','dos trip','do strip','Those.','2','दो'])
+def test_live_call_quantity_answers_add_two_strips(client,seed_catalogue,answer):
+    session=voice(client)
+    first=turn(client,session,'BRUFEN 200 MG 15S')
+    assert first['order_summary'] is None and 'मात्रा' in first['assistant_text']
+    result=turn(client,session,answer)
+    assert result['order_summary'] is not None, result['assistant_text']
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00013',2,'STRIP')
+    assert result['language']=='hi'
+
+
+def test_unclear_quantity_answer_still_asks_again(client,seed_catalogue):
+    session=voice(client)
+    turn(client,session,'BRUFEN 200 MG 15S')
+    result=turn(client,session,'NARISLIP')
+    assert result['order_summary'] is None and 'मात्रा' in result['assistant_text']
+
+
+def test_number_only_uses_bottles_for_syrup_and_asks_unit_for_others(client,seed_catalogue,db_session):
+    from app.database.models import Medicine
+    db_session.add_all([
+        Medicine(medicine_id="MED-00021",medicine_name="CREMAFFIN",description="MINT/PLAIN SYP 225ML",source_serial_number="21",source_row=21),
+        Medicine(medicine_id="MED-00011",medicine_name="ARACHITOL",description="INJ 6L BOX",source_serial_number="11",source_row=11),
+    ])
+    db_session.commit()
+    session=voice(client)
+    turn(client,session,'MED-00021')
+    result=turn(client,session,'2')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00021',2,'BOTTLE')
+    other=voice(client)
+    turn(client,other,'MED-00011')
+    asked=turn(client,other,'2')
+    assert asked['order_summary'] is None and 'इकाई' in asked['assistant_text']
+
+
+def test_confirmation_speaks_a_short_order_number(client,seed_catalogue):
+    session=voice(client)
+    turn(client,session,'brufin 200 MG, 4 FATTE CHIYAYE')
+    turn(client,session,'order confirm')
+    confirmed=turn(client,session,'order confirm')
+    order_id=confirmed['order']['order_id']
+    assert order_id not in confirmed['assistant_text']
+    assert ' '.join(order_id[-6:].upper()) in confirmed['assistant_text']

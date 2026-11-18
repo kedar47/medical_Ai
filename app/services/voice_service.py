@@ -44,6 +44,7 @@ from app.services.matching_service import MedicineMatchingService, normalize_tex
 from app.services.order_service import OrderService
 from app.services.voice import build_intent_parser, build_stt, build_tts
 from app.services.voice.intent import (
+    DO_AS_ENGLISH_WORDS,
     DeterministicIntentParser,
     contains_medicine_id,
     description_strength_tokens,
@@ -91,6 +92,27 @@ def _as_utc(value: datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
+
+
+_PACK_OF_TABLETS = re.compile(r"(?<!\w)\d+\s*['*]?\s*s(?!\w)", re.IGNORECASE)
+_LIQUID = re.compile(r"(?<!\w)(?:syp|syrup|susp|suspension)(?!\w)", re.IGNORECASE)
+
+
+def default_unit_for(description: str | None) -> OrderUnit | None:
+    """Natural unit when the caller gives only a number: strips for a tablet
+    pack ("15'S", "1*S"), bottles for a syrup or suspension, else ask."""
+    description = description or ""
+    if _PACK_OF_TABLETS.search(description):
+        return OrderUnit.STRIP
+    if _LIQUID.search(description):
+        return OrderUnit.BOTTLE
+    return None
+
+
+def spoken_order_reference(order_id: str) -> str:
+    """Last 6 characters, spaced so TTS reads them one by one. Reading the
+    full 32-character ID took ~15 s of synthesis and playback on a call."""
+    return " ".join(order_id[-6:].upper())
 
 def _text(hi: str, en: str, language: str) -> str:
     return hi if language == "hi" else en
@@ -623,6 +645,10 @@ class VoiceService:
         unit: OrderUnit | None,
         language: str,
     ) -> TurnDraft:
+        if quantity is not None and unit is None:
+            # "दो" for a 15'S tablet pack means two strips. The reply reads the
+            # unit back and the order still needs an explicit confirmation.
+            unit = default_unit_for(candidate.description)
         if quantity is None or unit is None:
             state.pending = VoicePendingState(
                 kind="quantity",
@@ -733,6 +759,9 @@ class VoiceService:
         quantity = quantity or pending.quantity
         if quantity is None:
             quantity = extract_quantity(text)
+        if quantity is None and set(normalize_text(text).split()) & DO_AS_ENGLISH_WORDS:
+            # Answer to "how many?": Whisper often writes दो as "those" or "doe".
+            quantity = 2
         unit = unit or pending.unit
         candidate = MedicineMatchCandidate(
             medicine_id=pending.medicine_id,
@@ -996,8 +1025,8 @@ class VoiceService:
             intent=VoiceIntent.CONFIRM_ORDER,
             language=language,
             assistant_text=_text(
-                f"ऑर्डर कन्फर्म हो गया। ऑर्डर ID {order.order_id} है। धन्यवाद।",
-                f"Order confirmed. Your order ID is {order.order_id}. Thank you.",
+                f"ऑर्डर कन्फर्म हो गया। ऑर्डर नंबर {spoken_order_reference(order.order_id)} है। धन्यवाद।",
+                f"Order confirmed. Your order number is {spoken_order_reference(order.order_id)}. Thank you.",
                 language,
             ),
             order=order,
@@ -1424,8 +1453,8 @@ class VoiceService:
             intent=VoiceIntent.CONFIRM_ORDER,
             language=language,
             assistant_text=_text(
-                f"यह ऑर्डर पहले ही कन्फर्म है। ऑर्डर ID {order.order_id} है।",
-                f"This order is already confirmed. The order ID is {order.order_id}.",
+                f"यह ऑर्डर पहले ही कन्फर्म है। ऑर्डर नंबर {spoken_order_reference(order.order_id)} है।",
+                f"This order is already confirmed. The order number is {spoken_order_reference(order.order_id)}.",
                 language,
             ),
             order=order,

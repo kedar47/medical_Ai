@@ -292,6 +292,10 @@ QUANTITY_WORDS = {
     "an": 1,
     "ek": 1,
     "do": 2,
+    "doe": 2,
+    "dho": 2,
+    "doh": 2,
+    "dou": 2,
     "teen": 3,
     "char": 4,
     "chaar": 4,
@@ -338,6 +342,22 @@ UNIT_ALIASES: dict[OrderUnit, tuple[str, ...]] = {
         "pathe",
         "fatte",
         "phatte",
+        # Whisper's spellings of स्ट्रिप on phone audio ("DOSCRIP", "dos trip").
+        "scrip",
+        "scrips",
+        "stip",
+        "stips",
+        "strep",
+        "streps",
+        "stripe",
+        "stripes",
+        "trip",
+        "trips",
+        "steps",
+        "istrip",
+        "istrips",
+        "इस्ट्रिप",
+        "स्त्रिप",
         "स्ट्रिप्स",
         "स्ट्रिप",
         "स्ट्रीप्स",
@@ -601,9 +621,30 @@ def _unit_for_alias(value: str) -> OrderUnit | None:
     return UNIT_ALIAS_LOOKUP.get(value.casefold())
 
 
+_STRIP_WORD = r"(?:strips?|scrips?|stips?|streps?|stripes?|trips?|istrips?)"
+# "DOESTRIP", "DOSCRIP", "teenstrip": number and unit heard as one word.
+_MERGED_QUANTITY_UNIT = re.compile(
+    rf"(?<!\w)(ek|do|doe|dho|doh|teen|char|chaar|panch|paanch|\d{{1,3}})(?={_STRIP_WORD}(?!\w))",
+    re.IGNORECASE,
+)
+# "those strips": Whisper hears दो as an English word before a strip word.
+_DO_AS_ENGLISH = re.compile(
+    rf"(?<!\w)(?:those|though|dose|doze|dough|dos)\s+(?={_STRIP_WORD}(?!\w))",
+    re.IGNORECASE,
+)
+# दो on its own, as an answer to "how many?".
+DO_AS_ENGLISH_WORDS = {"those", "though", "dough", "doe", "dho", "doh"}
+
+
+def normalize_spoken_quantities(text: str) -> str:
+    text = _MERGED_QUANTITY_UNIT.sub(lambda match: match.group(1) + " ", text)
+    return _DO_AS_ENGLISH.sub("do ", text)
+
+
 def extract_quantity_unit(
     text: str,
 ) -> tuple[int | None, OrderUnit | None, str]:
+    text = normalize_spoken_quantities(text)
     candidates = []
     for regex in (_QUANTITY_BEFORE_UNIT, _QUANTITY_AFTER_UNIT):
         match = regex.search(text)

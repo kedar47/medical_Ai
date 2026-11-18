@@ -199,14 +199,14 @@ class CallManager:
         call.status = "PROCESSING"
         self.db.commit()
         started = time.perf_counter()
-        voice_session = self.voice.get_session(call.voice_session_id)
+        speech_language = self.voice.speech_language(call.voice_session_id)
         stt_started = time.perf_counter()
         try:
             transcript = self.voice.transcribe_audio(
                 wav(pcm),
                 filename="telephone.wav",
                 content_type="audio/wav",
-                language=voice_session.language,
+                language=speech_language,
             )
         except NoSpeechError:
             # Line noise or a cough is not a caller turn: skip it and keep the
@@ -220,7 +220,7 @@ class CallManager:
         logger.info(
             "telephony.stt.transcript call_id=%s stt_ms=%s audio_bytes=%s requested_language=%s "
             "detected_language=%s language_probability=%s duration_seconds=%s transcript=%s",
-            call_id, stt_ms, len(pcm), voice_session.language, transcript.language,
+            call_id, stt_ms, len(pcm), speech_language, transcript.language,
             transcript.language_probability, transcript.duration_seconds, transcript.transcript,
         )
         if cancelled.is_set():

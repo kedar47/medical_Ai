@@ -381,6 +381,33 @@ def test_noise_without_speech_is_skipped_and_call_continues(simulated_gateway, s
     assert db_session.scalar(select(OrderSession)).items
 
 
+def test_call_speech_recognition_stays_in_starting_language(simulated_gateway, seed_catalogue, db_session):
+    # Live call 2026-11-18: one English-looking turn switched the session to
+    # English, and English-mode Whisper then turned Hindi speech into nonsense.
+    client, stt = simulated_gateway
+    stt.text = "add two strips of clomin"
+    languages = []
+    original = stt.transcribe
+
+    def recording(audio_bytes, **kwargs):
+        languages.append(kwargs.get("language"))
+        return original(audio_bytes, **kwargs)
+
+    stt.transcribe = recording
+    with client.websocket_connect("/telephony/media", headers=AUTH) as ws:
+        ws.send_json(start())
+        drain(ws)
+        send_audio(ws, 1)
+        drain(ws)
+        send_audio(ws, 2)
+        drain(ws)
+        ws.send_json({"event": "stop", "stream_sid": "stream-1"})
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+    assert db_session.scalar(select(VoiceSession)).language == "en"
+    assert languages == ["hi", "hi"]
+
+
 def test_unknown_medicine_not_added(simulated_gateway, seed_catalogue, db_session):
     client, stt = simulated_gateway
     stt.text = "add two strips of nonexistentxyz"

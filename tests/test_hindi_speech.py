@@ -168,6 +168,42 @@ def test_real_synthetic_phone_transcription_punctuation(client,seed_catalogue):
     assert item['medicine_id']=='MED-00013' and item['quantity']==4
 
 
+# Actual phone transcripts from live Exotel calls on 2026-11-18 (Hindi calls).
+@pytest.mark.parametrize('text,medicine,quantity', [
+    ('brufin 200 MG, 4 FATTE CHIYAYE','MED-00013',4),
+    ('brufin 200, NJ, 4 STRIPS CHIYAYE','MED-00013',4),
+    ('brufin 200MG 15S 4 पटे चालिए','MED-00013',4),
+    ('2 STRIP BRUFEN 400, CHAHIÉ','MED-00014',2),
+])
+def test_live_call_english_letter_transcripts_use_strength(client,seed_catalogue,text,medicine,quantity):
+    result=turn(client,voice(client),text)
+    assert result['order_summary'] is not None, result['assistant_text']
+    item=result['order_summary']['items'][0]
+    assert item['medicine_id']==medicine and item['quantity']==quantity and item['unit']=='STRIP'
+    assert result['language']=='hi'
+
+
+def test_hindi_session_stays_hindi_for_short_english_words(client,seed_catalogue):
+    session=voice(client)
+    # Whisper often hallucinates "Thank you" on a short noise burst.
+    assert turn(client,session,'Thank you')['language']=='hi'
+    assert turn(client,session,'BRUFEN')['language']=='hi'
+    assert client.get(f"/voice/sessions/{session['voice_session_id']}").json()['language']=='hi'
+
+
+def test_hindi_session_switches_for_a_full_english_sentence(client,seed_catalogue):
+    result=turn(client,voice(client),'I need two strips of brufin 400.')
+    assert result['language']=='en'
+    assert result['order_summary']['items'][0]['medicine_id']=='MED-00014'
+
+
+def test_pack_size_is_not_used_to_pick_strength(client,seed_catalogue):
+    session=voice(client)
+    turn(client,session,'मुझे ब्रूफेन के चार पत्ते चाहिए')
+    result=turn(client,session,'BRUFEN 400MG 15S')
+    assert result['order_summary']['items'][0]['medicine_id']=='MED-00014'
+
+
 def test_real_synthetic_browser_unclear_strength_requires_clarification(client,seed_catalogue):
     # Actual local-STT text: "दो सा" is unclear and must not become 200 by guessing.
     result=turn(client,voice(client),'मुझे ब्रूफेन, दो सा एमजी के चार पते चाहीए')

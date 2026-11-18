@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import unicodedata
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -87,6 +88,35 @@ UNAMBIGUOUS_HINDI_HINTS = {
     "doosri",
     "teesra",
 }
+
+# Whisper spells "चाहिए" in English letters many ways on phone audio:
+# chahiye, chahie, chaiye, chiyaye, chaahiye, chahiyee.
+_CHAHIYE = re.compile(r"^ch(?:a{1,2}h?i{1,2}|i)y?(?:a?y)?e{1,2}$")
+
+# English command words that show the caller really switched to English.
+# A Hindi session switches only on one of these, so a medicine name, "yes",
+# or Whisper's usual noise hallucinations ("Thank you", "Bye") keep a Hindi
+# call in Hindi. Units and numbers are left out: Hindi-mode Whisper writes
+# पत्ते as "STRIPS" and numbers as digits for Hindi speech.
+ENGLISH_HINTS = {
+    "i", "need", "want", "add", "please", "give", "me", "my", "the", "of",
+    "to", "is", "it", "can", "would", "like", "remove", "delete", "change",
+    "update", "make", "quantity", "last", "item", "what", "how", "show",
+    "help",
+}
+
+
+def fold_latin(token: str) -> str:
+    """Drop accents from an English-letter token (CHAHIÉ -> chahie)."""
+    if any("ऀ" <= character <= "ॿ" for character in token):
+        return token
+    decomposed = unicodedata.normalize("NFKD", token)
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def _is_hindi_filler(token: str) -> bool:
+    return token in FILLER_WORDS or bool(_CHAHIYE.match(token))
+
 
 GREETING_WORDS = {
     "hi",
@@ -300,6 +330,12 @@ UNIT_ALIASES: dict[OrderUnit, tuple[str, ...]] = {
         "pattas",
         "patta",
         "patte",
+        "pattey",
+        "pate",
+        "patey",
+        "pathe",
+        "fatte",
+        "phatte",
         "स्ट्रिप्स",
         "स्ट्रिप",
         "स्ट्रीप्स",
@@ -311,6 +347,7 @@ UNIT_ALIASES: dict[OrderUnit, tuple[str, ...]] = {
         "पट्टी",
         "पट्टे",
         "पते",
+        "पटे",
     ),
     OrderUnit.TABLET: (
         "tablets",
@@ -388,6 +425,8 @@ _STRENGTH_WITH_UNIT = re.compile(
     r"(?<!\d)\d{1,4}(?:\s*(?:mg|mcg|ml|gm|g|iu|%))(?!\w)",
     re.IGNORECASE,
 )
+# Pack size read back from a catalogue option, e.g. "15S" or "15'S".
+_PACK_SIZE = re.compile(r"(?<!\w)\d{1,3}\s*'?\s*s(?!\w)", re.IGNORECASE)
 _DIGITS = re.compile(r"\d+")
 
 FILLER_WORDS = {
@@ -414,6 +453,9 @@ FILLER_WORDS = {
     "चाहिये",
     "चाहीए",
     "चाइए",
+    "चालिए",
+    "muje",
+    "mujhey",
     "मुझे",
     "मुझको",
     "को",
@@ -507,14 +549,18 @@ def detect_language(text: str, default: str = "hi") -> str:
     if any("\u0900" <= character <= "\u097f" for character in text):
         return "hi"
     normalized = normalize_text(text)
-    tokens = set(normalized.split())
+    tokens = {fold_latin(token) for token in normalized.split()}
     if tokens & UNAMBIGUOUS_HINDI_HINTS:
+        return "hi"
+    if any(_CHAHIYE.match(token) for token in tokens):
         return "hi"
     if len(tokens & HINDI_HINTS) >= 2:
         return "hi"
-    if any(character.isalpha() for character in text):
-        return "en"
-    return default
+    if not any(character.isalpha() for character in text):
+        return default
+    if default == "hi":
+        return "en" if tokens & ENGLISH_HINTS else "hi"
+    return "en"
 
 
 def _contains_phrase(normalized_text: str, phrase: str) -> bool:
@@ -592,7 +638,13 @@ def normalize_spoken_strengths(text: str) -> str:
     # Exact linguistic forms only, never guess an unclear spoken strength.
     # ASR may insert a comma between a strength number and its spoken unit.
     text = re.sub(r"[,،।]", " ", text)
-    units = r"(?:एम\s*जी|मिली\s*ग्राम|मिलीग्राम|mg)"
+    # Latin forms include phone-audio mishearings of "MG" right after a number
+    # ("200, NJ"). Only the digits pick a variant, and the caller still hears
+    # the order summary and must confirm it.
+    units = (
+        r"(?:एम\s*जी|मिली\s*ग्राम|मिलीग्राम|mg|mgs|milli\s*grams?|"
+        r"m\s*g|em\s*ji|em\s*jee|nj|mj)"
+    )
     hundreds = {
         200: ("दो सौ", "टू हंड्रेड", "टू हन्ड्रेड", "two hundred"),
         400: ("चार सौ", "फोर हंड्रेड", "four hundred"),
@@ -607,11 +659,13 @@ def normalize_spoken_strengths(text: str) -> str:
 
 def clean_medicine_query(text: str) -> str:
     remaining = normalize_spoken_strengths(text)
-    for regex in (_STRENGTH_WITH_UNIT, _STANDALONE_NUMBER):
+    for regex in (_STRENGTH_WITH_UNIT, _PACK_SIZE, _STANDALONE_NUMBER):
         remaining = regex.sub(" ", remaining)
     normalized = normalize_text(remaining)
     tokens = [
-        token for token in normalized.split() if token not in FILLER_WORDS
+        folded
+        for folded in (fold_latin(token) for token in normalized.split())
+        if not _is_hindi_filler(folded)
     ]
     return " ".join(tokens)
 

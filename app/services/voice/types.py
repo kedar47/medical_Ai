@@ -32,6 +32,10 @@ class VoiceState(BaseModel):
     guard: ConfirmationGuard = Field(default_factory=ConfirmationGuard)
     summary_digest: str | None = None
     language: Literal["hi", "en"] = "hi"
+    # Language the session started in. Phone calls keep speech recognition in
+    # this language: Hindi-mode Whisper handles English speech, but
+    # English-mode Whisper turns Hindi speech into unrelated English words.
+    initial_language: Literal["hi", "en"] | None = None
 
 
 class ParsedIntent(BaseModel):

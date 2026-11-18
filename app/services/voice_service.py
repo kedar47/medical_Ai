@@ -154,7 +154,9 @@ class VoiceService:
             order_session=order_db,
             status=ACTIVE,
             language=payload.language,
-            state_json=VoiceState(language=payload.language).model_dump_json(),
+            state_json=VoiceState(
+                language=payload.language, initial_language=payload.language
+            ).model_dump_json(),
             expires_at=min(_as_utc(order_session.expires_at), voice_expiry),
         )
         self.voice_repository.add_session(voice_session)
@@ -167,6 +169,12 @@ class VoiceService:
         if self._sync_status(voice):
             self.db.commit()
         return self._serialize_session(voice)
+
+    def speech_language(self, public_voice_session_id: str) -> str:
+        """Language for phone speech recognition: the one the call started in."""
+        voice = self._get_voice(public_voice_session_id)
+        state = self._load_state(voice)
+        return state.initial_language or state.language
 
     def process_text(
         self,
@@ -1161,6 +1169,13 @@ class VoiceService:
         text: str,
     ) -> MedicineMatchCandidate | None:
         strength_tokens = extract_strength_tokens(text)
+        if candidates:
+            # A number every option shares (the "15" in "15'S" pack size)
+            # cannot tell the options apart, so it must not block a choice.
+            shared = set.intersection(
+                *(description_strength_tokens(c.description) for c in candidates)
+            )
+            strength_tokens -= shared
         if not strength_tokens:
             return None
         matches = [

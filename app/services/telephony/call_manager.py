@@ -9,7 +9,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
-from app.core.exceptions import VoiceError
+from app.core.exceptions import NoSpeechError, VoiceError
 from app.database.models import CallLog, CallTurn, Order, VoiceSession, utc_now
 from app.schemas.voice import VoiceSessionCreate
 from app.services.voice_service import VoiceService, _as_utc
@@ -195,17 +195,27 @@ class CallManager:
             return None
         if _as_utc(call.started_at) + timedelta(seconds=get_settings().telephony_max_call_seconds) <= utc_now():
             raise VoiceError(408, "Call duration exceeded")
+        previous_status = call.status
         call.status = "PROCESSING"
         self.db.commit()
         started = time.perf_counter()
         voice_session = self.voice.get_session(call.voice_session_id)
         stt_started = time.perf_counter()
-        transcript = self.voice.transcribe_audio(
-            wav(pcm),
-            filename="telephone.wav",
-            content_type="audio/wav",
-            language=voice_session.language,
-        )
+        try:
+            transcript = self.voice.transcribe_audio(
+                wav(pcm),
+                filename="telephone.wav",
+                content_type="audio/wav",
+                language=voice_session.language,
+            )
+        except NoSpeechError:
+            # Line noise or a cough is not a caller turn: skip it and keep the
+            # call open instead of ending it as a voice failure.
+            logger.info("telephony.stt.no_speech call_id=%s audio_bytes=%s", call_id, len(pcm))
+            call = self.get(call_id)
+            call.status = previous_status
+            self.db.commit()
+            return None
         stt_ms = int((time.perf_counter() - stt_started) * 1000)
         logger.info(
             "telephony.stt.transcript call_id=%s stt_ms=%s audio_bytes=%s requested_language=%s "

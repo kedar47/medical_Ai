@@ -22,3 +22,7 @@ class VoiceError(Exception):
         self.status_code = status_code
         self.detail = detail
         self.extra = extra or {}
+
+
+class NoSpeechError(VoiceError):
+    """The audio held no recognisable speech (silence, a cough, line noise)."""

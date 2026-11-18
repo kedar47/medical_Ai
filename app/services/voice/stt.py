@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from app.core.config import Settings
-from app.core.exceptions import VoiceError
+from app.core.exceptions import NoSpeechError, VoiceError
 from app.services.voice.types import TranscriptionResult
 
 
@@ -205,7 +205,7 @@ class FasterWhisperSTT:
                     pass
 
         if not transcript:
-            raise VoiceError(
+            raise NoSpeechError(
                 400,
                 "No speech was detected in the audio. Please try again.",
             )

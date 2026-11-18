@@ -14,7 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.api.telephony_routes import get_call_session_factory
 from app.core.config import get_settings
-from app.core.exceptions import VoiceError
+from app.core.exceptions import NoSpeechError, VoiceError
 from app.database.models import CallLog, Order, OrderSession, VoiceSession
 from app.main import app
 from app.schemas.voice import VoiceSessionCreate, VoiceTurnRequest
@@ -349,6 +349,36 @@ def test_failed_corrections_block_confirmation(simulated_gateway, seed_catalogue
     draft = db_session.scalar(select(OrderSession))
     assert draft.status == "CANCELLED"
     assert call.status == "DISCONNECTED" and call.ended_at
+
+
+def test_noise_without_speech_is_skipped_and_call_continues(simulated_gateway, seed_catalogue, db_session):
+    # Live call 2026-11-18: a 0.8 s noise burst held no speech, STT raised
+    # "No speech was detected" and the whole call ended as a voice failure.
+    client, stt = simulated_gateway
+    stt.text = "add two strips of clomin"
+    calls = {"count": 0}
+    original = stt.transcribe
+
+    def noisy_first(audio_bytes, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise NoSpeechError(400, "No speech was detected in the audio. Please try again.")
+        return original(audio_bytes, **kwargs)
+
+    stt.transcribe = noisy_first
+    with client.websocket_connect("/telephony/media", headers=AUTH) as ws:
+        ws.send_json(start())
+        drain(ws)
+        send_audio(ws, 1)
+        send_audio(ws, 2)
+        drain(ws)
+        ws.send_json({"event": "stop", "stream_sid": "stream-1"})
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+    assert calls["count"] == 2
+    call = db_session.scalar(select(CallLog))
+    assert call.error_category is None and call.status != "FAILED"
+    assert db_session.scalar(select(OrderSession)).items
 
 
 def test_unknown_medicine_not_added(simulated_gateway, seed_catalogue, db_session):

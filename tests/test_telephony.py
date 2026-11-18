@@ -425,12 +425,15 @@ def test_queue_full_drops_turn_without_closing_call(simulated_gateway, db_sessio
         return original_process(self, call_id, pcm, cancelled)
 
     monkeypatch.setattr(CallManager, "process", blocked_process)
+    # Turn 1 is in flight; turns 2-3 fill the queue (size 2); turn 4 is dropped.
+    monkeypatch.setattr(get_settings(), "telephony_turn_queue_size", 2)
     with client.websocket_connect("/telephony/media", headers=AUTH) as ws:
         ws.send_json(start())
         drain(ws)
         send_audio(ws, 1)
         assert entered.wait(10)
-        send_audio(ws, 2)
+        for sequence in (2, 3, 4):
+            send_audio(ws, sequence)
         release.set()
         ws.send_json({"event": "stop", "stream_sid": "stream-1"})
         with pytest.raises(WebSocketDisconnect):

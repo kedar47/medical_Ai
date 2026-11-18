@@ -149,8 +149,13 @@ class FasterWhisperSTT:
                 prompt_parts = []
                 if self.settings.voice_stt_initial_prompt.strip():
                     prompt_parts.append(self.settings.voice_stt_initial_prompt.strip())
-                if self._vocabulary:
-                    prompt_parts.append("Medicine names: " + ", ".join(self._vocabulary))
+                # Hint with English-letter names only. Devanagari aliases in the
+                # prompt make Whisper loop on English speech (garbage output and
+                # temperature retries: 70-100 s instead of ~2.5 s on 2 vCPU).
+                # The aliases still apply in text matching after transcription.
+                latin_names = [name for name in self._vocabulary if name.isascii()]
+                if latin_names:
+                    prompt_parts.append("Medicine names: " + ", ".join(latin_names))
                 initial_prompt = " ".join(prompt_parts)[:600] or None
                 vad_parameters = None
                 if self.settings.voice_stt_vad_filter:

@@ -104,6 +104,24 @@ def test_hotwords_are_opt_in(monkeypatch):
     assert recorded['hotwords'] is None
 
 
+def test_initial_prompt_uses_english_letter_names_only(monkeypatch):
+    # Devanagari aliases in the prompt made English speech loop for 70-100 s.
+    from types import SimpleNamespace
+    from app.services.voice.stt import FasterWhisperSTT
+    from app.core.config import get_settings
+    recorded={}
+    class Model:
+        def transcribe(self,path,**kwargs):
+            recorded.update(kwargs)
+            return [SimpleNamespace(text="I need brufen")],SimpleNamespace(language="en",language_probability=1,duration=1)
+    adapter=FasterWhisperSTT(get_settings())
+    monkeypatch.setattr(adapter.settings,'voice_stt_initial_prompt','')
+    adapter.set_vocabulary(["BRUFEN","ब्रूफेन","brufin","क्लोमिन"])
+    monkeypatch.setattr(adapter,'_get_model',lambda:Model())
+    adapter.transcribe(b'audio',filename='test.wav',language='hi')
+    assert recorded['initial_prompt']=="Medicine names: BRUFEN, brufin"
+
+
 def test_tts_collapses_padded_catalogue_whitespace(monkeypatch):
     import numpy as np
     import wave

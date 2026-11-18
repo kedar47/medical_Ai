@@ -187,7 +187,7 @@ class CallManager:
             )
         return call
 
-    def process(self, call_id, pcm, cancelled):
+    def process(self, call_id, pcm, cancelled, synthesize=True):
         from app.services.telephony.audio_bridge import wav
         from app.schemas.voice import VoiceTurnRequest
         call = self.get(call_id)
@@ -240,13 +240,13 @@ class CallManager:
         self.db.commit()
         if cancelled.is_set():
             return None
-        from app.services.telephony.speech import synthesize_full
-        from app.services.voice import build_tts
+        if not synthesize:
+            # The media stream speaks the reply itself, sentence by sentence.
+            return turn
         from app.schemas.voice import VoiceTTSRead
         import base64
         tts_started = time.perf_counter()
-        audio = synthesize_full(self.voice._tts or build_tts(get_settings()), turn.assistant_text,
-                                turn.language, get_settings().voice_max_tts_chars)
+        audio = self.speak(turn.assistant_text, turn.language)
         logger.info("telephony.tts.done synthesis_ms=%s sample_rate=%s",
                     int((time.perf_counter() - tts_started) * 1000), audio.sample_rate)
         turn.tts = VoiceTTSRead(audio_base64=base64.b64encode(audio.data).decode(),
@@ -254,6 +254,13 @@ class CallManager:
         call.last_latency_ms = int((time.perf_counter() - started) * 1000)
         self.db.commit()
         return turn
+
+    def speak(self, text, language):
+        """Synthesize reply text (or one sentence of it) for the telephone."""
+        from app.services.telephony.speech import synthesize_full
+        from app.services.voice import build_tts
+        return synthesize_full(self.voice._tts or build_tts(get_settings()), text,
+                               language, get_settings().voice_max_tts_chars)
 
     def greeting(self, call_id):
         call = self.get(call_id)

@@ -476,10 +476,10 @@ def test_queue_full_drops_turn_without_closing_call(simulated_gateway, db_sessio
     release = threading.Event()
     original_process = CallManager.process
 
-    def blocked_process(self, call_id, pcm, cancelled):
+    def blocked_process(self, call_id, pcm, cancelled, *args):
         entered.set()
         assert release.wait(10)
-        return original_process(self, call_id, pcm, cancelled)
+        return original_process(self, call_id, pcm, cancelled, *args)
 
     monkeypatch.setattr(CallManager, "process", blocked_process)
     # Turn 1 is in flight; turns 2-3 fill the queue (size 2); turn 4 is dropped.
@@ -890,3 +890,66 @@ def test_call_detail_includes_conversation_transcripts(
     assert [turn["speaker"] for turn in transcripts] == ["CALLER", "AGENT"]
     assert "clomin" in transcripts[0]["text"].lower()
     assert transcripts[0]["text"] == stt.text
+
+
+def test_speech_parts_split_sentences_and_numbered_options():
+    from app.services.telephony.speech import speech_parts
+    text = ("Please say the correct full name, strength, or medicine ID: 1) BRUFEN 200MG 15'S "
+            "2) BRUFEN 400MG 15'S 3) BRUFEN 600MG 15'S")
+    parts = speech_parts(text)
+    assert parts[0] == "Please say the correct full name, strength, or medicine ID:"
+    assert " ".join(parts) == " ".join(text.split())
+    assert len(parts) >= 3
+    hindi = speech_parts("ठीक है, BRUFEN (200MG 15'S) की 4 स्ट्रिप जोड़ दी। ऑर्डर में अभी 1 आइटम हैं।")
+    assert hindi == ["ठीक है, BRUFEN (200MG 15'S) की 4 स्ट्रिप जोड़ दी।", "ऑर्डर में अभी 1 आइटम हैं।"]
+    assert speech_parts("2.5 ml") == ["2.5 ml"]
+
+
+def test_reply_starts_playing_before_the_whole_reply_is_synthesized(
+    simulated_gateway, seed_catalogue, monkeypatch, caplog
+):
+    # Live calls waited 4-8 s of synthesis before any reply audio. Now the
+    # first sentence plays while the rest is still being synthesized.
+    client, stt = simulated_gateway
+    stt.text = "add two strips of brufen"
+    spoken = []
+    original = TTS.synthesize
+
+    def slow(self, text, **kwargs):
+        time.sleep(0.2)
+        spoken.append(text)
+        return original(self, text, **kwargs)
+
+    monkeypatch.setattr(TTS, "synthesize", slow)
+    with client.websocket_connect("/telephony/media", headers=AUTH) as ws:
+        ws.send_json(start())
+        drain(ws)
+        send_audio(ws, 1)
+        drain(ws)
+        ws.send_json({"event": "stop", "stream_sid": "stream-1"})
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+    assert len(spoken) >= 3
+    messages = [record.message for record in caplog.records]
+    started = next(i for i, m in enumerate(messages) if "telephony.playback.start kind=reply" in m)
+    finished = next(i for i, m in enumerate(messages) if "telephony.tts.done" in m)
+    assert started < finished
+
+
+def test_kokoro_reuses_audio_for_repeated_text(monkeypatch):
+    import numpy as np
+    from app.services.voice.tts import KokoroTextToSpeech
+    calls = []
+
+    class Engine:
+        def create(self, text, **kwargs):
+            calls.append(text)
+            return np.array([0.0, 0.1], dtype=np.float32), 24000
+
+    adapter = KokoroTextToSpeech(get_settings())
+    monkeypatch.setattr(adapter, "_get_engine", lambda: Engine())
+    first = adapter.synthesize("Please say the quantity.", language="en")
+    second = adapter.synthesize("Please   say the quantity.", language="en")
+    adapter.synthesize("Please say the quantity.", language="hi")
+    assert first is second
+    assert len(calls) == 2

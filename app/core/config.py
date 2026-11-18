@@ -73,6 +73,18 @@ class Settings(BaseSettings):
     # Faster-Whisper hotwords are opt-in: measured locally they can make short
     # turns 15-20x slower and copy the hint into the transcript.
     voice_stt_hotwords_enabled: bool = False
+    # Whisper's default retries a hard-to-decode clip at 6 temperatures with 5
+    # samples each, each filling up to 448 tokens of junk: 34-63 s per phone
+    # turn on the 2 vCPU demo server. One retry is still needed: at 0.0 alone,
+    # English phone speech in Hindi mode loops. Comma-separated.
+    voice_stt_temperatures: str = "0.0,0.4"
+    voice_stt_best_of: int = Field(default=1, ge=1, le=5)
+    # Whisper's own loop signal: text this repetitive is junk, not speech.
+    voice_stt_max_compression_ratio: float = Field(default=2.4, ge=1.0, le=10.0)
+    # Cap output tokens by audio length (base + per second) so a noise clip
+    # cannot decode a long loop of junk. 0 per second turns the cap off.
+    voice_stt_max_tokens_base: int = Field(default=24, ge=8, le=448)
+    voice_stt_max_tokens_per_second: int = Field(default=16, ge=0, le=100)
     voice_tts_enabled: bool = True
     voice_tts_voice_hi: str = "hf_alpha"
     voice_tts_voice_en: str = "af_heart"

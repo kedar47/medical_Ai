@@ -5,6 +5,7 @@ signature or unauthenticated dynamic URL resolver is provided.
 """
 import asyncio
 import base64
+import contextlib
 import hmac
 import json
 import logging
@@ -34,12 +35,17 @@ from app.services.telephony.exotel_adapter import ExotelAdapter
 from app.services.telephony.exotel_client import outbound_config_issues
 from app.services.telephony.mock_adapter import MockAdapter
 from app.services.telephony.schemas import MockIncoming
+from app.services.telephony.speech import speech_parts
 
 router = APIRouter(prefix="/telephony", tags=["telephony"])
 logger = logging.getLogger(__name__)
 BARGE_IN_SPEECH_BYTES = 4 * FRAME_BYTES
 # This CPU demo intentionally accepts one media call per API process.
 CALL_SLOT = threading.BoundedSemaphore(1)
+
+
+async def _single_clip(audio):
+    yield audio
 
 
 def authorize(value, expected):
@@ -258,58 +264,103 @@ async def handle_media(ws: WebSocket, factory):
         started_playback = time.monotonic()
         playback_kind, playback_frames_sent = kind, 0
         barge_in_voiced_bytes, barge_in_handled = 0, False
-        sent = 0
+        # `audio` is one complete clip (greeting) or an async stream of clips,
+        # one per sentence, that is still being synthesized while it plays.
+        sources = audio if hasattr(audio, "__aiter__") else _single_clip(audio)
         try:
             to_chunks = pcm_frames if raw_pcm else frames
-            chunks = await asyncio.to_thread(to_chunks, audio)
-            logger.info("telephony.playback.start kind=%s text_length=%s tts_sample_rate=%s total_bytes=%s frame_count=%s",
-                        kind, text_length, tts_sample_rate, len(audio), len(chunks))
-            if kind == "greeting" and s.greeting_delay_ms:
-                logger.info("telephony.playback.greeting_delay_start delay_ms=%s", s.greeting_delay_ms)
-                await asyncio.sleep(s.greeting_delay_ms / 1000)
-                logger.info("telephony.playback.greeting_delay_done delay_ms=%s", s.greeting_delay_ms)
-            for payload in chunks:
-                sequence += 1
-                message = adapter.media(stream, payload, sequence, minimal=s.exotel_minimal_media)
-                await send_ws(message, "media")
-                sent += 1
-                playback_frames_sent = sent
-                if sent == 1:
-                    decoded = base64.b64decode(payload)
-                    redacted = dict(message)
-                    redacted["media"] = dict(message["media"])
-                    redacted["media"]["payload"] = (
-                        f"<base64:{len(payload)} chars,hex:{decoded[:16].hex()}>"
-                    )
-                    logger.info("telephony.media.outgoing_first message=%s",
-                                json.dumps(redacted, separators=(",", ":")))
-                    logger.info("telephony.media.format_check event=%s stream_sid_match=%s raw_pcm=%s "
-                                "pcm_hex=%s payload_chars=%s frame_bytes=%s frame_multiple_320=%s "
-                                "keys=%s media_keys=%s",
-                                message.get("event"), message.get("stream_sid") == stream,
-                                decoded[:4] != b"RIFF", decoded[:16].hex(), len(payload), len(decoded),
-                                len(decoded) >= 3200 and len(decoded) % 320 == 0,
-                                sorted(message), sorted(message["media"]))
-                if sent == 1 or sent % 50 == 0:
-                    logger.info("telephony.playback.frame_sent kind=%s index=%s/%s sequence=%s payload_chars=%s "
-                                "sent_at_ms=%s",
-                                kind, sent, len(chunks), sequence, len(payload),
-                                int((time.monotonic() - started_playback) * 1000))
-                await asyncio.sleep(PLAYBACK_INTERVAL_SECONDS)
+            async with contextlib.aclosing(sources):
+                first_clip = True
+                async for clip in sources:
+                    chunks = await asyncio.to_thread(to_chunks, clip)
+                    if first_clip:
+                        first_clip = False
+                        logger.info("telephony.playback.start kind=%s text_length=%s tts_sample_rate=%s "
+                                    "total_bytes=%s frame_count=%s first_audio_ms=%s",
+                                    kind, text_length, tts_sample_rate, len(clip), len(chunks),
+                                    int((time.monotonic() - started_playback) * 1000))
+                        if kind == "greeting" and s.greeting_delay_ms:
+                            logger.info("telephony.playback.greeting_delay_start delay_ms=%s", s.greeting_delay_ms)
+                            await asyncio.sleep(s.greeting_delay_ms / 1000)
+                            logger.info("telephony.playback.greeting_delay_done delay_ms=%s", s.greeting_delay_ms)
+                    await send_frames(chunks, started_playback, kind)
             expected_mark = f"{'done' if terminal else 'reply'}-{sequence}"
             await send_ws(adapter.mark(stream, expected_mark), "mark")
             logger.info("telephony.playback.done kind=%s frames_sent=%s elapsed_ms=%s",
-                        kind, sent, int((time.monotonic() - started_playback) * 1000))
+                        kind, playback_frames_sent, int((time.monotonic() - started_playback) * 1000))
         except asyncio.CancelledError:
             logger.info("telephony.playback.cancelled kind=%s frames_sent=%s elapsed_ms=%s",
-                        kind, sent, int((time.monotonic() - started_playback) * 1000))
+                        kind, playback_frames_sent, int((time.monotonic() - started_playback) * 1000))
             raise
         except Exception:
             stop_reason, error = "server_error", "PLAYBACK"
-            cancel_playback("error", frames_sent=sent)
+            cancel_playback("error", frames_sent=playback_frames_sent)
             logger.exception("telephony.playback.error kind=%s frames_sent=%s elapsed_ms=%s",
-                             kind, sent, int((time.monotonic() - started_playback) * 1000))
+                             kind, playback_frames_sent, int((time.monotonic() - started_playback) * 1000))
             raise
+
+    async def send_frames(chunks, started_playback, kind):
+        nonlocal sequence, playback_frames_sent
+        for payload in chunks:
+            sequence += 1
+            message = adapter.media(stream, payload, sequence, minimal=s.exotel_minimal_media)
+            await send_ws(message, "media")
+            playback_frames_sent += 1
+            sent = playback_frames_sent
+            if sent == 1:
+                decoded = base64.b64decode(payload)
+                redacted = dict(message)
+                redacted["media"] = dict(message["media"])
+                redacted["media"]["payload"] = (
+                    f"<base64:{len(payload)} chars,hex:{decoded[:16].hex()}>"
+                )
+                logger.info("telephony.media.outgoing_first message=%s",
+                            json.dumps(redacted, separators=(",", ":")))
+                logger.info("telephony.media.format_check event=%s stream_sid_match=%s raw_pcm=%s "
+                            "pcm_hex=%s payload_chars=%s frame_bytes=%s frame_multiple_320=%s "
+                            "keys=%s media_keys=%s",
+                            message.get("event"), message.get("stream_sid") == stream,
+                            decoded[:4] != b"RIFF", decoded[:16].hex(), len(payload), len(decoded),
+                            len(decoded) >= 3200 and len(decoded) % 320 == 0,
+                            sorted(message), sorted(message["media"]))
+            if sent == 1 or sent % 50 == 0:
+                logger.info("telephony.playback.frame_sent kind=%s index=%s sequence=%s payload_chars=%s "
+                            "sent_at_ms=%s",
+                            kind, sent, sequence, len(payload),
+                            int((time.monotonic() - started_playback) * 1000))
+            await asyncio.sleep(PLAYBACK_INTERVAL_SECONDS)
+
+    async def speak_ahead(text, language):
+        """Yield one WAV clip per sentence, synthesizing the next while one plays."""
+        parts = speech_parts(text)
+        clips = asyncio.Queue()
+        started_tts = time.monotonic()
+
+        async def produce():
+            try:
+                for index, part in enumerate(parts):
+                    audio = await asyncio.to_thread(run, "speak", part, language)
+                    if index == 0:
+                        logger.info("telephony.tts.first_part synthesis_ms=%s parts=%s chars=%s",
+                                    int((time.monotonic() - started_tts) * 1000), len(parts), len(part))
+                    await clips.put(audio.data)
+                logger.info("telephony.tts.done synthesis_ms=%s parts=%s",
+                            int((time.monotonic() - started_tts) * 1000), len(parts))
+                await clips.put(None)
+            except Exception as exc:
+                await clips.put(exc)
+
+        producer = asyncio.create_task(produce())
+        try:
+            while True:
+                item = await clips.get()
+                if item is None:
+                    return
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            producer.cancel()
 
     async def consume():
         nonlocal playback, processing, turn_inflight, generation, terminal_reply, barge_in_voiced_bytes
@@ -322,7 +373,7 @@ async def handle_media(ws: WebSocket, factory):
                     logger.info("telephony.reply.skipped reason=stale_queued_turn queued_generation=%s generation=%s",
                                 queued_generation, current)
                     continue
-                processing = asyncio.create_task(asyncio.to_thread(run, "process", call_id, pcm, cancelled))
+                processing = asyncio.create_task(asyncio.to_thread(run, "process", call_id, pcm, cancelled, False))
                 turn = await asyncio.shield(processing)
                 if cancelled.is_set():
                     logger.info("telephony.reply.skipped reason=cancelled generation=%s", current)
@@ -330,9 +381,6 @@ async def handle_media(ws: WebSocket, factory):
                 if turn is None:
                     logger.info("telephony.reply.skipped reason=null_turn generation=%s", current)
                     continue
-                if turn.tts_error or not turn.tts:
-                    logger.warning("telephony.reply.skipped reason=tts_unavailable generation=%s", current)
-                    raise VoiceError(503, "Speech synthesis unavailable")
                 terminal_reply = turn.status.value != "ACTIVE"
                 if current != generation:
                     logger.info("telephony.reply.skipped reason=stale_generation current=%s generation=%s",
@@ -341,10 +389,9 @@ async def handle_media(ws: WebSocket, factory):
                     await asyncio.to_thread(run, "invalidate_summary", call_id)
                     continue
                 barge_in_voiced_bytes = 0
-                playback = asyncio.create_task(play(base64.b64decode(turn.tts.audio_base64),
+                playback = asyncio.create_task(play(speak_ahead(turn.assistant_text, turn.language),
                                                     terminal=turn.status.value != "ACTIVE",
                                                     text_length=len(turn.assistant_text),
-                                                    tts_sample_rate=turn.tts.sample_rate,
                                                     kind="reply"))
                 try:
                     await playback

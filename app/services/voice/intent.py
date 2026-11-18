@@ -93,16 +93,18 @@ UNAMBIGUOUS_HINDI_HINTS = {
 # chahiye, chahie, chaiye, chiyaye, chaahiye, chahiyee.
 _CHAHIYE = re.compile(r"^ch(?:a{1,2}h?i{1,2}|i)y?(?:a?y)?e{1,2}$")
 
-# English command words that show the caller really switched to English.
-# A Hindi session switches only on one of these, so a medicine name, "yes",
-# or Whisper's usual noise hallucinations ("Thank you", "Bye") keep a Hindi
-# call in Hindi. Units and numbers are left out: Hindi-mode Whisper writes
-# पत्ते as "STRIPS" and numbers as digits for Hindi speech.
-ENGLISH_HINTS = {
-    "i", "need", "want", "add", "please", "give", "me", "my", "the", "of",
-    "to", "is", "it", "can", "would", "like", "remove", "delete", "change",
-    "update", "make", "quantity", "last", "item", "what", "how", "show",
-    "help",
+# English words that show the caller really switched to English. A Hindi
+# session switches on one request word ("add clomin", "help") or two small
+# words, so a medicine name, "yes", or Whisper noise such as "Thank you" or
+# "THAT IS CLIP" keeps a Hindi call in Hindi. Units and numbers are left out:
+# Hindi-mode Whisper writes पत्ते as "STRIPS" and numbers as digits.
+ENGLISH_REQUEST_WORDS = {
+    "add", "need", "want", "please", "give", "remove", "delete", "change",
+    "update", "help", "show",
+}
+ENGLISH_SMALL_WORDS = {
+    "i", "me", "my", "the", "of", "to", "is", "it", "can", "would", "like",
+    "make", "quantity", "last", "item", "what", "how",
 }
 
 
@@ -559,7 +561,9 @@ def detect_language(text: str, default: str = "hi") -> str:
     if not any(character.isalpha() for character in text):
         return default
     if default == "hi":
-        return "en" if tokens & ENGLISH_HINTS else "hi"
+        if tokens & ENGLISH_REQUEST_WORDS or len(tokens & ENGLISH_SMALL_WORDS) >= 2:
+            return "en"
+        return "hi"
     return "en"
 
 

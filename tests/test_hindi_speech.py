@@ -188,6 +188,8 @@ def test_hindi_session_stays_hindi_for_short_english_words(client,seed_catalogue
     # Whisper often hallucinates "Thank you" on a short noise burst.
     assert turn(client,session,'Thank you')['language']=='hi'
     assert turn(client,session,'BRUFEN')['language']=='hi'
+    # Live-call Whisper junk with one small English word.
+    assert turn(client,session,'THAT IS CLIP')['language']=='hi'
     assert client.get(f"/voice/sessions/{session['voice_session_id']}").json()['language']=='hi'
 
 
@@ -208,3 +210,78 @@ def test_real_synthetic_browser_unclear_strength_requires_clarification(client,s
     # Actual local-STT text: "दो सा" is unclear and must not become 200 by guessing.
     result=turn(client,voice(client),'मुझे ब्रूफेन, दो सा एमजी के चार पते चाहीए')
     assert result['order_summary'] is None and len(result['candidates'])==3
+
+
+def _wav_seconds(seconds, rate=16000):
+    import io, wave
+    out=io.BytesIO()
+    with wave.open(out,'wb') as w:
+        w.setnchannels(1);w.setsampwidth(2);w.setframerate(rate);w.writeframes(bytes(2*int(rate*seconds)))
+    return out.getvalue()
+
+
+def test_whisper_does_not_retry_and_caps_tokens_by_length(monkeypatch):
+    # 1 s of phone noise took 40-53 s: 6 temperature retries, each decoding junk.
+    from types import SimpleNamespace
+    from app.services.voice.stt import FasterWhisperSTT
+    from app.core.config import get_settings
+    recorded={}
+    class Model:
+        def transcribe(self,path,**kwargs):
+            recorded.update(kwargs)
+            return [SimpleNamespace(text="ब्रूफेन")],SimpleNamespace(language="hi",language_probability=1,duration=2)
+    adapter=FasterWhisperSTT(get_settings())
+    monkeypatch.setattr(adapter,'_get_model',lambda:Model())
+    adapter.transcribe(_wav_seconds(2.0),filename='call.wav',language='hi')
+    assert recorded['temperature']==(0.0,0.4) and recorded['best_of']==1
+    s=get_settings()
+    assert recorded['max_new_tokens']==s.voice_stt_max_tokens_base+2*s.voice_stt_max_tokens_per_second
+    adapter.transcribe(b'webm-bytes',filename='browser.webm',language='hi')
+    assert recorded['max_new_tokens'] is None
+
+
+def test_punctuation_only_transcript_is_no_speech(monkeypatch):
+    from types import SimpleNamespace
+    from app.core.exceptions import NoSpeechError
+    from app.services.voice.stt import FasterWhisperSTT
+    from app.core.config import get_settings
+    class Model:
+        def transcribe(self,path,**kwargs):
+            return [SimpleNamespace(text=" . ")],SimpleNamespace(language="hi",language_probability=1,duration=1)
+    adapter=FasterWhisperSTT(get_settings())
+    monkeypatch.setattr(adapter,'_get_model',lambda:Model())
+    with pytest.raises(NoSpeechError):
+        adapter.transcribe(_wav_seconds(1.0),filename='call.wav',language='hi')
+
+
+def test_echoed_hint_names_are_no_speech(monkeypatch):
+    # Live call: unclear audio came back as the prompt's own medicine list.
+    from types import SimpleNamespace
+    from app.core.exceptions import NoSpeechError
+    from app.services.voice.stt import FasterWhisperSTT
+    from app.core.config import get_settings
+    texts=["CREMAFINE, CORFLAM, MADRIN, CREMAFFIN, CORFLAM, CORFLAM,"]
+    class Model:
+        def transcribe(self,path,**kwargs):
+            return [SimpleNamespace(text=texts[0])],SimpleNamespace(language="hi",language_probability=1,duration=2)
+    adapter=FasterWhisperSTT(get_settings())
+    adapter.set_vocabulary(["BRUFEN","CREMAFFIN","CORFLAM","MADRIN","ब्रूफेन"])
+    monkeypatch.setattr(adapter,'_get_model',lambda:Model())
+    with pytest.raises(NoSpeechError):
+        adapter.transcribe(_wav_seconds(2.0),filename='call.wav',language='hi')
+    texts[0]="brufin 200 MG, 4 FATTE CHIYAYE"
+    assert adapter.transcribe(_wav_seconds(2.0),filename='call.wav',language='hi').transcript==texts[0]
+
+
+def test_looping_segment_is_dropped(monkeypatch):
+    from types import SimpleNamespace
+    from app.core.exceptions import NoSpeechError
+    from app.services.voice.stt import FasterWhisperSTT
+    from app.core.config import get_settings
+    class Model:
+        def transcribe(self,path,**kwargs):
+            return [SimpleNamespace(text="కారికికికికికికికి",compression_ratio=3.5)],SimpleNamespace(language="hi",language_probability=1,duration=2)
+    adapter=FasterWhisperSTT(get_settings())
+    monkeypatch.setattr(adapter,'_get_model',lambda:Model())
+    with pytest.raises(NoSpeechError):
+        adapter.transcribe(_wav_seconds(2.0),filename='call.wav',language='hi')

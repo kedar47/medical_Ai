@@ -1,8 +1,27 @@
 """Full readbacks via the existing local TTS, with bounded synthesis chunks."""
 import io
+import re
 import wave
 
 from app.core.exceptions import VoiceError
+
+# Split after a sentence end (Hindi danda, . ? ! :) or before a numbered
+# option such as "2) BRUFEN 400MG", so a phone reply can start playing after
+# its first sentence is synthesized instead of after the whole reply.
+_SPEECH_BREAK = re.compile(r"(?<=[।.?!:])\s+|\s+(?=\d{1,2}\)\s)")
+
+
+def speech_parts(text: str, min_chars: int = 24) -> list[str]:
+    text = " ".join(text.split())
+    parts: list[str] = []
+    for piece in (p.strip() for p in _SPEECH_BREAK.split(text)):
+        if not piece:
+            continue
+        if parts and len(parts[-1]) < min_chars:
+            parts[-1] = f"{parts[-1]} {piece}"
+        else:
+            parts.append(piece)
+    return parts or ([text] if text else [])
 
 
 def synthesize_full(tts, text, language, limit=600):

@@ -1,6 +1,7 @@
 import io
 import threading
 import wave
+from collections import OrderedDict
 from pathlib import Path
 
 from app.core.config import Settings
@@ -13,6 +14,10 @@ class KokoroTextToSpeech:
         self.settings = settings
         self._engine = None
         self._lock = threading.Lock()
+        # Replies repeat ("Please say the correct full name..."), and on a
+        # 2 vCPU server each one costs seconds of synthesis. Keep recent clips.
+        self._cache: OrderedDict[tuple, SynthesizedAudio] = OrderedDict()
+        self._cache_size = 64
 
     @property
     def model_path(self) -> Path:
@@ -71,6 +76,12 @@ class KokoroTextToSpeech:
             else self.settings.voice_tts_voice_en
         )
         kokoro_language = "hi" if language == "hi" else "en-us"
+        key = (text, voice, self.settings.voice_tts_speed, kokoro_language)
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
         try:
             with self._lock:
                 samples, sample_rate = engine.create(
@@ -104,8 +115,14 @@ class KokoroTextToSpeech:
             output.setsampwidth(2)
             output.setframerate(int(sample_rate))
             output.writeframes(pcm)
-        return SynthesizedAudio(
+        audio = SynthesizedAudio(
             data=buffer.getvalue(),
             sample_rate=int(sample_rate),
             voice=voice,
         )
+        with self._lock:
+            self._cache[key] = audio
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+        return audio

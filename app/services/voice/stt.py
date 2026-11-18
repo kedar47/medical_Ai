@@ -67,6 +67,44 @@ class FasterWhisperSTT:
     def preload(self) -> None:
         self._get_model()
 
+    def _echoes_hint_names(self, transcript: str) -> bool:
+        """True when Whisper copied the medicine-name hint instead of speech."""
+        from rapidfuzz import fuzz
+
+        names = [name.casefold() for name in self._vocabulary if name.isascii()]
+        if not names:
+            return False
+        pieces = [" ".join(piece.casefold().split()).strip(" .") for piece in transcript.split(",")]
+        hits = sum(
+            1 for piece in pieces
+            if piece and any(fuzz.ratio(piece, name) >= 80 for name in names)
+        )
+        return hits >= 3
+
+    def _temperatures(self) -> tuple[float, ...]:
+        values = []
+        for part in self.settings.voice_stt_temperatures.split(","):
+            try:
+                value = float(part)
+            except ValueError:
+                continue
+            if 0.0 <= value <= 1.0:
+                values.append(value)
+        return tuple(values) or (0.0,)
+
+    def _max_new_tokens(self, audio_bytes: bytes) -> int | None:
+        """Token budget for a WAV clip, from its length. None if unknown."""
+        per_second = self.settings.voice_stt_max_tokens_per_second
+        if not per_second:
+            return None
+        try:
+            with wave.open(io.BytesIO(audio_bytes), "rb") as reader:
+                seconds = reader.getnframes() / float(reader.getframerate())
+        except (wave.Error, EOFError, ValueError, ZeroDivisionError):
+            return None  # Browser WebM: length unknown before decoding.
+        budget = self.settings.voice_stt_max_tokens_base + int(per_second * seconds)
+        return min(budget, 440)
+
     def _get_model(self):
         if self._model is not None:
             return self._model
@@ -102,6 +140,7 @@ class FasterWhisperSTT:
         initial_prompt: str | None,
         hotwords: str | None,
         vad_parameters: dict | None,
+        max_new_tokens: int | None = None,
     ) -> tuple[str, object]:
         with self._inference_lock:
             segments, info = model.transcribe(
@@ -114,9 +153,17 @@ class FasterWhisperSTT:
                 condition_on_previous_text=False,
                 initial_prompt=initial_prompt,
                 hotwords=hotwords,
+                temperature=self._temperatures(),
+                best_of=self.settings.voice_stt_best_of,
+                compression_ratio_threshold=self.settings.voice_stt_max_compression_ratio,
+                max_new_tokens=max_new_tokens,
             )
+            # When every attempt failed, Whisper still returns its last try.
+            # A looping segment ("CREMAFFIN, CREMAFFIN, ...") is dropped.
+            limit = self.settings.voice_stt_max_compression_ratio
             transcript = " ".join(
                 segment.text.strip() for segment in segments
+                if getattr(segment, "compression_ratio", 0.0) <= limit
             ).strip()
         return transcript, info
 
@@ -129,6 +176,7 @@ class FasterWhisperSTT:
     ) -> TranscriptionResult:
         model = self._get_model()
         audio_bytes = _resample_wav_to_16k(audio_bytes)
+        max_new_tokens = self._max_new_tokens(audio_bytes)
         suffix = Path(filename or "").suffix.lower()
         if not suffix or len(suffix) > 8:
             suffix = ".webm"
@@ -189,9 +237,16 @@ class FasterWhisperSTT:
                     transcript, info = self._transcribe_once(
                         model, temporary_path, attempt_language,
                         initial_prompt, hotwords, vad_parameters,
+                        max_new_tokens,
                     )
                     if transcript:
                         break
+                # Noise, not speech: punctuation alone (".") or the hint list
+                # echoed back ("CREMAFINE, CORFLAM, MADRIN, CREMAFFIN, ...").
+                if not any(character.isalnum() for character in transcript):
+                    transcript = ""
+                elif self._echoes_hint_names(transcript):
+                    transcript = ""
             except Exception as exc:
                 raise VoiceError(
                     400,

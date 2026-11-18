@@ -47,6 +47,7 @@ from app.services.voice.intent import (
     DO_AS_ENGLISH_WORDS,
     DeterministicIntentParser,
     first_quantity_word,
+    fold_latin,
     contains_medicine_id,
     description_strength_tokens,
     detect_language,
@@ -635,20 +636,40 @@ class VoiceService:
             )
 
         if result.candidates:
+            # One exact catalogue name was heard among unclear words: only the
+            # variant is open (live call: "LOSCHIT, LOSCHIT, CREMAFFIN").
+            spoken_strengths = extract_strength_tokens(text)
+            candidate_strengths = set().union(
+                *(description_strength_tokens(c.description) for c in result.candidates)
+            )
+            strength_conflict = bool(spoken_strengths - candidate_strengths)
+            name_heard = (
+                bool(mentioned)
+                and not strength_conflict
+                and len(
+                    {normalize_text(c.medicine_name) for c in result.candidates}
+                ) == 1
+            )
+            if name_heard and len(result.candidates) == 1:
+                # "COG, CLOMIN, F": the only CLOMIN in the catalogue. Nothing
+                # to choose; ask the quantity (read back before confirming).
+                return self._add_candidate(
+                    voice, state, result.candidates[0], quantity, unit, language
+                )
             state.pending = VoicePendingState(
                 kind="candidate",
                 candidates=result.candidates,
                 quantity=quantity,
                 unit=unit,
                 requested_text=query,
-                match_status="NOT_FOUND",
+                match_status="NAME_HEARD" if name_heard else "NOT_FOUND",
             )
             return TurnDraft(
                 intent=VoiceIntent.ADD_ITEM,
                 language=language,
                 candidates=result.candidates,
                 assistant_text=self._candidate_prompt(
-                    result.candidates, language, fuzzy=True
+                    result.candidates, language, fuzzy=not name_heard
                 ),
             )
         return TurnDraft(
@@ -763,6 +784,11 @@ class VoiceService:
 
         selected = self._select_candidate(pending, text)
         if selected is None:
+            switched = self._names_another_medicine(
+                text, {c.medicine_name for c in pending.candidates}
+            )
+            if switched is not None:
+                return switched(voice, state, language)
             return TurnDraft(
                 intent=VoiceIntent.SELECT_CANDIDATE,
                 language=language,
@@ -778,6 +804,22 @@ class VoiceService:
         return self._add_candidate(
             voice, state, selected, quantity, unit, language
         )
+
+    def _names_another_medicine(self, text: str, current_names: set[str]):
+        """Live call: while BRUFEN's quantity was pending, the caller said
+        "ARACHITOL INJ ... BOX" and BRUFEN got the unit "box". A different
+        catalogue name means the caller moved on: start adding that one."""
+        mentioned = self.matching.suggestions_from_utterance(text)
+        current = {normalize_text(name) for name in current_names}
+        if not mentioned or any(normalize_text(c.medicine_name) in current for c in mentioned):
+            return None
+
+        def add_new(voice, state, language):
+            state.pending = None
+            parsed = self._parse_intent(text, language, None)
+            return self._handle_add(voice, state, parsed, text, language)
+
+        return add_new
 
     def _handle_quantity_pending(
         self,
@@ -804,6 +846,10 @@ class VoiceService:
                 language=language,
                 assistant_text=self._repeat_quantity_text(language),
             )
+
+        switched = self._names_another_medicine(text, {pending.medicine_name or ""})
+        if switched is not None:
+            return switched(voice, state, language)
 
         quantity, unit, _ = extract_quantity_unit(text)
         quantity = quantity or pending.quantity
@@ -861,7 +907,12 @@ class VoiceService:
         elif explicit_reference:
             item, prompt = self._resolve_item(voice, state, text, language)
         else:
-            item, prompt = None, result.message or "Please specify the exact medicine, strength, new quantity and unit."
+            # Live call: a Hindi caller got this English-only message.
+            item, prompt = None, _text(
+                "कृपया दवा, strength, नई मात्रा और इकाई साफ़ बताएं।",
+                result.message or "Please specify the exact medicine, strength, new quantity and unit.",
+                language,
+            )
         if item is None:
             return TurnDraft(
                 intent=VoiceIntent.UPDATE_ITEM,
@@ -1206,7 +1257,7 @@ class VoiceService:
                     return candidate
             return None
 
-        fuzzy = any(
+        fuzzy = pending.match_status != "NAME_HEARD" and any(
             candidate.match_type == "FUZZY_SUGGESTION"
             for candidate in candidates
         )
@@ -1239,12 +1290,42 @@ class VoiceService:
                     return matching[0]
             return None
 
+        word_selected = self._select_candidate_from_words(candidates, text)
+        if word_selected is not None:
+            return word_selected
         if len(explicit_name) == 1:
             return explicit_name[0]
         ordinal = extract_ordinal(text)
         if ordinal is not None and 1 <= ordinal <= len(candidates):
             return candidates[ordinal - 1]
         return None
+
+    def _select_candidate_from_words(
+        self,
+        candidates: list[MedicineMatchCandidate],
+        text: str,
+    ) -> MedicineMatchCandidate | None:
+        """Pick a variant by a word only its description has: "mixed fruit",
+        "plus" or "mint" for the three CREMAFFIN syrups."""
+        from rapidfuzz import fuzz
+
+        spoken = {fold_latin(t) for t in normalize_text(text).split() if len(t) >= 3}
+        if not spoken or len(candidates) < 2:
+            return None
+        words = [
+            {t for t in normalize_text(c.description or "").split() if t.isalpha() and len(t) >= 3}
+            for c in candidates
+        ]
+        matches = []
+        for index, own in enumerate(words):
+            others = set().union(*(w for j, w in enumerate(words) if j != index))
+            distinct = own - others
+            if any(
+                token == word or (len(word) >= 4 and fuzz.ratio(token, word) >= 80)
+                for token in spoken for word in distinct
+            ):
+                matches.append(candidates[index])
+        return matches[0] if len(matches) == 1 else None
 
     def _exact_name_with_strength(
         self,

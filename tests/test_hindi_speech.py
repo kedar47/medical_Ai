@@ -396,4 +396,86 @@ def test_phone_transcription_skips_the_english_retry(monkeypatch):
         adapter.transcribe(_wav_seconds(1.0),filename='call.wav',language='hi',allow_fallback=False)
     assert languages==['hi']
     assert adapter.transcribe(_wav_seconds(1.0),filename='call.wav',language='hi').transcript=='CREMAFFIN'
-#ttrsfx
+
+
+# Live call 2026-11-18 09:22, turn by turn.
+@pytest.fixture
+def syrups_and_injection(db_session,seed_catalogue):
+    from app.database.models import Medicine
+    db_session.add_all([
+        Medicine(medicine_id="MED-00021",medicine_name="CREMAFFIN",description="MINT/PLAIN SYP 225ML",source_serial_number="21",source_row=21),
+        Medicine(medicine_id="MED-00022",medicine_name="CREMAFFIN",description="MIXED FRUIT SYP 225ML",source_serial_number="22",source_row=22),
+        Medicine(medicine_id="MED-00023",medicine_name="CREMAFFIN",description="PLUS SYP 225ML",source_serial_number="23",source_row=23),
+        Medicine(medicine_id="MED-00011",medicine_name="ARACHITOL",description="INJ 6L BOX",source_serial_number="11",source_row=11),
+    ])
+    db_session.commit()
+
+
+def test_tab_in_medicine_name_is_not_the_unit(client,seed_catalogue):
+    session=voice(client)
+    first=turn(client,session,'CLOMIN TAB')
+    assert first['order_summary'] is None and 'गोली' not in first['assistant_text']
+    result=turn(client,session,'2 SKET CHI')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00003',2,'STRIP')
+
+
+@pytest.mark.parametrize('choice,medicine', [('दूसरा','MED-00022'),('doosara','MED-00022'),('mixed fruit','MED-00022'),('plus','MED-00023'),('pela','MED-00021')])
+def test_exact_name_among_noise_lets_caller_pick_variant(client,syrups_and_injection,choice,medicine):
+    session=voice(client)
+    first=turn(client,session,'LOSCHIT, LOSCHIT, CREMAFFIN')
+    assert len(first['candidates'])==3 and 'पहला' in first['assistant_text']
+    picked=turn(client,session,choice)
+    assert picked['order_summary'] is None and 'मात्रा' in picked['assistant_text']
+    result=turn(client,session,'2')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==(medicine,2,'BOTTLE')
+
+
+def test_naming_another_medicine_while_quantity_is_pending(client,syrups_and_injection):
+    session=voice(client)
+    turn(client,session,'brufin 200MG15S')
+    result=turn(client,session,'ARACHITOL INJ TICKSEL BOX')
+    assert result['order_summary'] is None or all(i['medicine_id']!='MED-00013' for i in result['order_summary']['items'])
+    assert [c['medicine_id'] for c in result['candidates']]==['MED-00011'] or 'ARACHITOL' in result['assistant_text']
+
+
+def test_order_kar_do_as_whisper_writes_it_confirms(client,seed_catalogue):
+    from app.services.voice.intent import DeterministicIntentParser
+    assert DeterministicIntentParser().parse('ORAT KARDO',language='hi').intent.value=='confirm_order'
+
+
+def test_junk_scripts_are_no_speech(monkeypatch):
+    from types import SimpleNamespace
+    from app.core.exceptions import NoSpeechError
+    from app.services.voice.stt import FasterWhisperSTT
+    from app.core.config import get_settings
+    texts=["੭੭੭੭੭੭", "4-4 ु ु 4 ु ु"]
+    class Model:
+        def transcribe(self,path,**kwargs):
+            return [SimpleNamespace(text=texts[0])],SimpleNamespace(language="hi",language_probability=1,duration=1)
+    adapter=FasterWhisperSTT(get_settings())
+    monkeypatch.setattr(adapter,'_get_model',lambda:Model())
+    for _ in range(2):
+        with pytest.raises(NoSpeechError):
+            adapter.transcribe(_wav_seconds(1.0),filename='call.wav',language='hi',allow_fallback=False)
+        texts.pop(0)
+
+
+def test_single_variant_name_among_noise_asks_quantity(client,seed_catalogue):
+    session=voice(client)
+    first=turn(client,session,'COG, CLOMIN, F')
+    assert first['candidates']==[] or first['candidates'] is None or len(first['candidates'])==0
+    assert 'CLOMIN TAB' in first['assistant_text'] and 'मात्रा' in first['assistant_text']
+    result=turn(client,session,'2 STF CHINEE')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00003',2,'STRIP')
+
+
+def test_live_call_09_28_clomin_and_four_strips(client,seed_catalogue):
+    session=voice(client)
+    first=turn(client,session,'MOUJEEK, CLOMIN TAB')
+    assert 'मात्रा' in first['assistant_text']
+    result=turn(client,session,'CHARIS TIP')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00003',4,'STRIP')

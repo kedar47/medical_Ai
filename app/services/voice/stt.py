@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import tempfile
 import threading
 import wave
@@ -44,6 +45,17 @@ def _resample_wav_to_16k(audio_bytes: bytes) -> bytes:
         writer.setframerate(_WHISPER_SAMPLE_RATE)
         writer.writeframes(np.clip(np.rint(resampled), -32768, 32767).astype("<i2").tobytes())
     return output.getvalue()
+
+
+def _is_junk_script(text: str) -> bool:
+    """Noise decoded as another script ("੭੭੭੭", Telugu loops) or as Hindi vowel
+    signs with no letter before them ("4-4 ु ु 4 ु ु"). Callers speak Hindi or
+    English, written in Devanagari or Latin."""
+    letters = [c for c in text if c.isalnum()]
+    usual = [c for c in letters if c.isascii() or "ऀ" <= c <= "ॿ"]
+    if letters and len(usual) < 0.6 * len(letters):
+        return True
+    return bool(re.search(r"(?:^|\s)[ा-्ँ-ः]", text))
 
 
 class FasterWhisperSTT:
@@ -251,7 +263,7 @@ class FasterWhisperSTT:
                 # echoed back ("CREMAFINE, CORFLAM, MADRIN, CREMAFFIN, ...").
                 if not any(character.isalnum() for character in transcript):
                     transcript = ""
-                elif self._echoes_hint_names(transcript):
+                elif self._echoes_hint_names(transcript) or _is_junk_script(transcript):
                     transcript = ""
             except Exception as exc:
                 raise VoiceError(

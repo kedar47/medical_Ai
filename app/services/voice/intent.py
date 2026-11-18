@@ -169,6 +169,11 @@ CONFIRM_PHRASES = (
     "kanfarm",
     "kanfirm",
     "kanfum",
+    # "ऑर्डर कर दो" as Whisper writes it ("ORAT KARDO").
+    "orat kardo",
+    "orat kar do",
+    "ordar kardo",
+    "ordar kar do",
     "haan ji",
     "ji haan",
     "कंफर्म",
@@ -566,7 +571,28 @@ ORDINAL_WORDS = {
     "dusri": 2,
     "teesra": 3,
     "teesri": 3,
+    # Whisper spellings on phone audio.
+    "pela": 1,
+    "pehela": 1,
+    "pahala": 1,
+    "pahela": 1,
+    "pehle": 1,
+    "pahle": 1,
+    "doosara": 2,
+    "dusara": 2,
+    "doosre": 2,
+    "dusre": 2,
+    "tisra": 3,
+    "tisri": 3,
+    "tesra": 3,
+    "teesara": 3,
+    "teesre": 3,
+    "tisre": 3,
     "पहला": 1,
+    "पहले": 1,
+    "दुसरा": 2,
+    "दूसरे": 2,
+    "तीसरे": 3,
     "पहली": 1,
     "दूसरा": 2,
     "दूसरी": 2,
@@ -685,13 +711,34 @@ def first_quantity_word(text: str) -> int | None:
     return None
 
 
+_NAME_SUFFIX_UNITS = {"tab", "tabs"}
+
+
+def _unit_is_part_of_name(text: str, match) -> bool:
+    """"CLOMIN TAB" is a medicine name, not the unit tablet: a short unit word
+    right after another word (not a number) belongs to that name."""
+    if match.group("unit").casefold() not in _NAME_SUFFIX_UNITS:
+        return False
+    if "qty" in match.groupdict() and match.start("qty") < match.start("unit"):
+        return False  # "2 tab": number first, so it is the unit.
+    before = re.search(r"([^\W\d_]+)\W*$", text[: match.start("unit")])
+    return bool(before) and before.group(1).casefold() not in QUANTITY_WORDS
+
+
+def _first_unit_match(regex, text):
+    for match in regex.finditer(text):
+        if not _unit_is_part_of_name(text, match):
+            return match
+    return None
+
+
 def extract_quantity_unit(
     text: str,
 ) -> tuple[int | None, OrderUnit | None, str]:
     text = normalize_spoken_quantities(text)
     candidates = []
     for regex in (_QUANTITY_BEFORE_UNIT, _QUANTITY_AFTER_UNIT):
-        match = regex.search(text)
+        match = _first_unit_match(regex, text)
         if match is not None:
             candidates.append(match)
     if candidates:
@@ -701,7 +748,7 @@ def extract_quantity_unit(
         remaining = text[: match.start()] + " " + text[match.end() :]
         return quantity, unit, remaining
 
-    match = _UNIT_ONLY.search(text)
+    match = _first_unit_match(_UNIT_ONLY, text)
     if match is None:
         return None, None, text
     unit = _unit_for_alias(match.group("unit"))

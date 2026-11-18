@@ -21,7 +21,9 @@ class VoicePendingState(BaseModel):
     unit: OrderUnit | None = None
     candidates: list[MedicineMatchCandidate] = Field(default_factory=list)
     requested_text: str | None = None
-    match_status: Literal["CLARIFICATION_REQUIRED", "NOT_FOUND"] | None = None
+    # NAME_HEARD: an exact catalogue name was heard and only its variant is
+    # open, so the caller may pick it by number, strength or flavour.
+    match_status: Literal["CLARIFICATION_REQUIRED", "NOT_FOUND", "NAME_HEARD"] | None = None
 
 
 class VoiceState(BaseModel):

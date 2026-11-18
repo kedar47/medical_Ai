@@ -470,3 +470,12 @@ def test_single_variant_name_among_noise_asks_quantity(client,seed_catalogue):
     result=turn(client,session,'2 STF CHINEE')
     item=result['order_summary']['items'][0]
     assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00003',2,'STRIP')
+
+
+def test_live_call_09_28_clomin_and_four_strips(client,seed_catalogue):
+    session=voice(client)
+    first=turn(client,session,'MOUJEEK, CLOMIN TAB')
+    assert 'मात्रा' in first['assistant_text']
+    result=turn(client,session,'CHARIS TIP')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00003',4,'STRIP')

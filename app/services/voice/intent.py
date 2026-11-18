@@ -706,9 +706,26 @@ def first_quantity_word(text: str) -> int | None:
         if token in {"a", "an"}:
             continue
         value = _parse_quantity_value(token)
+        if value is None:
+            # "CHARIS TIP" for "चार स्ट्रिप": a Hindi number word with sounds
+            # stuck to it. Only words of 3+ letters, so "do" is not guessed.
+            value = next(
+                (number for word, number in _HINDI_NUMBER_PREFIXES if token.startswith(word)),
+                None,
+            )
         if value is not None:
             return value
     return None
+
+
+_HINDI_NUMBER_PREFIXES = sorted(
+    (
+        (word, number) for word, number in QUANTITY_WORDS.items()
+        if word.isascii() and len(word) >= 3 and word not in {"one", "two", "six", "ten", "an"}
+        and word in {"teen", "char", "chaar", "panch", "paanch", "saat", "aath", "das", "barah", "bees"}
+    ),
+    key=lambda pair: -len(pair[0]),
+)
 
 
 _NAME_SUFFIX_UNITS = {"tab", "tabs"}

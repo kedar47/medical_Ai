@@ -207,6 +207,7 @@ class CallManager:
                 filename="telephone.wav",
                 content_type="audio/wav",
                 language=speech_language,
+                allow_fallback=False,
             )
         except NoSpeechError:
             # Line noise or a cough is not a caller turn: skip it and keep the

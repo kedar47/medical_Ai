@@ -84,6 +84,7 @@ class SpeechToText(Protocol):
         *,
         filename: str | None = None,
         language: str | None = None,
+        allow_fallback: bool = True,
     ) -> TranscriptionResult: ...
 
 

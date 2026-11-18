@@ -391,6 +391,7 @@ def test_call_speech_recognition_stays_in_starting_language(simulated_gateway, s
 
     def recording(audio_bytes, **kwargs):
         languages.append(kwargs.get("language"))
+        assert kwargs.get("allow_fallback") is False  # no English retry on calls
         return original(audio_bytes, **kwargs)
 
     stt.transcribe = recording

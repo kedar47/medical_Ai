@@ -162,6 +162,22 @@ CONFIRM_PHRASES = (
     "ऑर्डर कर दो",
     "ठीक है",
     "हो गया",
+    # Live-call spellings: "order confirmed.", "2 STOPS KANFUM".
+    "confirmed",
+    "order confirmed",
+    "conform",
+    "kanfarm",
+    "kanfirm",
+    "kanfum",
+    "haan ji",
+    "ji haan",
+    "कंफर्म",
+    "कनफर्म",
+    "कंफर्म करो",
+    "कन्फर्म कीजिए",
+    "कंफर्म कीजिए",
+    "जी हाँ",
+    "हाँ जी",
 )
 
 CANCEL_PHRASES = (
@@ -356,6 +372,8 @@ UNIT_ALIASES: dict[OrderUnit, tuple[str, ...]] = {
         "steps",
         "istrip",
         "istrips",
+        "shrip",
+        "shrips",
         "इस्ट्रिप",
         "स्त्रिप",
         "स्ट्रिप्स",
@@ -621,24 +639,50 @@ def _unit_for_alias(value: str) -> OrderUnit | None:
     return UNIT_ALIAS_LOOKUP.get(value.casefold())
 
 
-_STRIP_WORD = r"(?:strips?|scrips?|stips?|streps?|stripes?|trips?|istrips?)"
+_STRIP_WORD = r"(?:strips?|scrips?|stips?|streps?|stripes?|trips?|istrips?|shrips?)"
 # "DOESTRIP", "DOSCRIP", "teenstrip": number and unit heard as one word.
 _MERGED_QUANTITY_UNIT = re.compile(
     rf"(?<!\w)(ek|do|doe|dho|doh|teen|char|chaar|panch|paanch|\d{{1,3}})(?={_STRIP_WORD}(?!\w))",
     re.IGNORECASE,
 )
-# "those strips": Whisper hears दो as an English word before a strip word.
-_DO_AS_ENGLISH = re.compile(
-    rf"(?<!\w)(?:those|though|dose|doze|dough|dos)\s+(?={_STRIP_WORD}(?!\w))",
+# "those strips", "egg strip": Whisper hears दो / एक as English words.
+_NUMBER_AS_ENGLISH = re.compile(
+    rf"(?<!\w)(those|though|dose|doze|dough|dos|egg|ake|aek)\s+(?={_STRIP_WORD}(?!\w))",
     re.IGNORECASE,
 )
+_NUMBER_AS_ENGLISH_VALUE = {"egg": "ek", "ake": "ek", "aek": "ek"}
+# "2-strip": a hyphen between a number and a word.
+_NUMBER_HYPHEN = re.compile(r"(?<=\d)-(?=[^\W\d_])")
 # दो on its own, as an answer to "how many?".
 DO_AS_ENGLISH_WORDS = {"those", "though", "dough", "doe", "dho", "doh"}
 
 
 def normalize_spoken_quantities(text: str) -> str:
+    text = _NUMBER_HYPHEN.sub(" ", text)
     text = _MERGED_QUANTITY_UNIT.sub(lambda match: match.group(1) + " ", text)
-    return _DO_AS_ENGLISH.sub("do ", text)
+    return _NUMBER_AS_ENGLISH.sub(
+        lambda match: _NUMBER_AS_ENGLISH_VALUE.get(match.group(1).lower(), "do") + " ", text
+    )
+
+
+def first_quantity_word(text: str) -> int | None:
+    """First number in an answer to "how many?" ("DO SHRIP" -> 2).
+
+    Only used while the agent is waiting for a quantity; the reply reads the
+    quantity back and the order still needs confirmation.
+    """
+    # Strengths ("200 MG"), pack sizes ("17S") and medicine IDs are not counts.
+    cleaned = normalize_spoken_strengths(normalize_spoken_quantities(text))
+    cleaned = re.sub(r"(?<!\w)MED-\d+(?!\w)", " ", cleaned, flags=re.IGNORECASE)
+    for regex in (_STRENGTH_WITH_UNIT, _PACK_SIZE):
+        cleaned = regex.sub(" ", cleaned)
+    for token in normalize_text(cleaned).split():
+        if token in {"a", "an"}:
+            continue
+        value = _parse_quantity_value(token)
+        if value is not None:
+            return value
+    return None
 
 
 def extract_quantity_unit(

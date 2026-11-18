@@ -173,6 +173,7 @@ class FasterWhisperSTT:
         *,
         filename: str | None = None,
         language: str | None = None,
+        allow_fallback: bool = True,
     ) -> TranscriptionResult:
         model = self._get_model()
         audio_bytes = _resample_wav_to_16k(audio_bytes)
@@ -226,6 +227,11 @@ class FasterWhisperSTT:
                     if self.settings.voice_stt_fallback_language in {"hi", "en"}
                     else None
                 )
+                if not allow_fallback:
+                    # Phone calls: when Hindi hears nothing, an English retry
+                    # turns "हाँ" into a medicine name ("CREMAFFIN") and doubles
+                    # the wait. Hindi mode already handles English speech.
+                    fallback = None
                 attempts: list[str | None] = []
                 for candidate in (requested, fallback):
                     if candidate and candidate not in attempts:

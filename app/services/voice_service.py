@@ -46,6 +46,7 @@ from app.services.voice import build_intent_parser, build_stt, build_tts
 from app.services.voice.intent import (
     DO_AS_ENGLISH_WORDS,
     DeterministicIntentParser,
+    first_quantity_word,
     contains_medicine_id,
     description_strength_tokens,
     detect_language,
@@ -107,12 +108,6 @@ def default_unit_for(description: str | None) -> OrderUnit | None:
     if _LIQUID.search(description):
         return OrderUnit.BOTTLE
     return None
-
-
-def spoken_order_reference(order_id: str) -> str:
-    """Last 6 characters, spaced so TTS reads them one by one. Reading the
-    full 32-character ID took ~15 s of synthesis and playback on a call."""
-    return " ".join(order_id[-6:].upper())
 
 def _text(hi: str, en: str, language: str) -> str:
     return hi if language == "hi" else en
@@ -314,13 +309,16 @@ class VoiceService:
         filename: str | None,
         content_type: str | None,
         language: str | None = None,
+        allow_fallback: bool = True,
     ) -> VoiceTranscriptRead:
         self._ensure_enabled()
         self._validate_audio(audio_bytes, content_type)
+        extra = {} if allow_fallback else {"allow_fallback": False}
         result = self._get_stt().transcribe(
             audio_bytes,
             filename=filename,
             language=language if language in {"hi", "en"} else None,
+            **extra,
         )
         if len(result.transcript) > self.settings.voice_max_transcript_chars:
             raise VoiceError(
@@ -574,6 +572,11 @@ class VoiceService:
         if result.status == "NOT_FOUND":
             mentioned = self.matching.suggestions_from_utterance(query)
             if mentioned:
+                selected = self._exact_name_with_strength(mentioned, query, text)
+                if selected is not None:
+                    return self._add_candidate(
+                        voice, state, selected, quantity, unit, language
+                    )
                 result = result.model_copy(update={"candidates": mentioned})
         if result.status == "EXACT_MATCH":
             return self._add_candidate(
@@ -762,6 +765,9 @@ class VoiceService:
         if quantity is None and set(normalize_text(text).split()) & DO_AS_ENGLISH_WORDS:
             # Answer to "how many?": Whisper often writes दो as "those" or "doe".
             quantity = 2
+        if quantity is None:
+            # "DO SHRIP", "the two strip": the count is there, the unit garbled.
+            quantity = first_quantity_word(text)
         unit = unit or pending.unit
         candidate = MedicineMatchCandidate(
             medicine_id=pending.medicine_id,
@@ -935,15 +941,12 @@ class VoiceService:
             return TurnDraft(intent=VoiceIntent.CONFIRM_ORDER, language=language,
                 assistant_text=_text("पहले लंबित बदलाव पूरा करें।", "Confirmation is blocked until the pending correction is resolved.", language))
         if state.pending is not None:
-            return TurnDraft(
-                intent=VoiceIntent.CONFIRM_ORDER,
-                language=language,
-                assistant_text=_text(
-                    "कन्फर्म करने से पहले कृपया पहले दवा का विकल्प या मात्रा पूरी करें।",
-                    "Please finish the pending medicine choice or quantity before confirming.",
-                    language,
-                ),
-            )
+            # Live call: Whisper heard "हाँ" as "CREMAFFIN", which opened a new
+            # item choice, and every "confirm" after that was refused. The
+            # half-chosen item was never added: drop it and read the order
+            # back, so the caller confirms exactly what they hear.
+            state.pending = None
+            return self._show_summary(voice, state, language)
 
         order_session = voice.order_session
         if (
@@ -1025,8 +1028,8 @@ class VoiceService:
             intent=VoiceIntent.CONFIRM_ORDER,
             language=language,
             assistant_text=_text(
-                f"ऑर्डर कन्फर्म हो गया। ऑर्डर नंबर {spoken_order_reference(order.order_id)} है। धन्यवाद।",
-                f"Order confirmed. Your order number is {spoken_order_reference(order.order_id)}. Thank you.",
+                "आपका ऑर्डर कन्फर्म हो गया है। धन्यवाद।",
+                "Your order is confirmed. Thank you.",
                 language,
             ),
             order=order,
@@ -1191,6 +1194,31 @@ class VoiceService:
         if ordinal is not None and 1 <= ordinal <= len(candidates):
             return candidates[ordinal - 1]
         return None
+
+    def _exact_name_with_strength(
+        self,
+        mentioned: list[MedicineMatchCandidate],
+        query: str,
+        text: str,
+    ) -> MedicineMatchCandidate | None:
+        """Live call: "brufan, 200MG, 15S, 2-strip file". The name is an exact
+        catalogue alias and the strength is spoken in digits; one stray word
+        ("file") must not throw away the strength. Garbled strengths have no
+        digits and still need an explicit choice."""
+        if len({normalize_text(c.medicine_name) for c in mentioned}) != 1:
+            return None
+        name = normalize_text(mentioned[0].medicine_name)
+        names = {name} | {alias for alias, target in self.matching._aliases().items() if target == name}
+        tokens = normalize_text(query).split()
+        known = set()
+        for phrase in names:
+            parts = phrase.split()
+            for index in range(len(tokens) - len(parts) + 1):
+                if tokens[index:index + len(parts)] == parts:
+                    known.update(range(index, index + len(parts)))
+        if not known or len(tokens) - len(known) > 1:
+            return None
+        return self._select_candidate_from_strength(mentioned, text)
 
     def _select_candidate_from_strength(
         self,
@@ -1453,8 +1481,8 @@ class VoiceService:
             intent=VoiceIntent.CONFIRM_ORDER,
             language=language,
             assistant_text=_text(
-                f"यह ऑर्डर पहले ही कन्फर्म है। ऑर्डर नंबर {spoken_order_reference(order.order_id)} है।",
-                f"This order is already confirmed. The order number is {spoken_order_reference(order.order_id)}.",
+                "यह ऑर्डर पहले ही कन्फर्म हो चुका है।",
+                "This order is already confirmed.",
                 language,
             ),
             order=order,

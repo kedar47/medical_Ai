@@ -326,11 +326,73 @@ def test_number_only_uses_bottles_for_syrup_and_asks_unit_for_others(client,seed
     assert asked['order_summary'] is None and 'इकाई' in asked['assistant_text']
 
 
-def test_confirmation_speaks_a_short_order_number(client,seed_catalogue):
+def test_confirmation_does_not_read_out_the_order_id(client,seed_catalogue):
     session=voice(client)
     turn(client,session,'brufin 200 MG, 4 FATTE CHIYAYE')
     turn(client,session,'order confirm')
     confirmed=turn(client,session,'order confirm')
-    order_id=confirmed['order']['order_id']
-    assert order_id not in confirmed['assistant_text']
-    assert ' '.join(order_id[-6:].upper()) in confirmed['assistant_text']
+    # Live call: the Hindi voice read the ID's digit runs as huge numbers
+    # ("arab", "kharab"). The ID is shown in the dashboard, not spoken.
+    assert confirmed['order']['order_id'] not in confirmed['assistant_text']
+    assert not any(c.isdigit() for c in confirmed['assistant_text'])
+
+
+# Live call 2026-11-18 08:53, turn by turn.
+def test_live_call_exact_name_and_strength_with_one_stray_word(client,seed_catalogue):
+    result=turn(client,voice(client),'brufan, 200MG, 15S, 2-strip file')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00013',2,'STRIP')
+
+
+def test_garbled_name_with_strength_digits_still_needs_a_choice(client,seed_catalogue):
+    # Two unknown words: too much is unclear to pick for the caller.
+    result=turn(client,voice(client),'brufan 200MG nara bara')
+    assert result['order_summary'] is None and len(result['candidates'])==3
+
+
+@pytest.mark.parametrize('answer,quantity', [('DO SHRIP',2),('egg strip',1),('the two strip',2)])
+def test_live_call_quantity_answers_after_strength_choice(client,seed_catalogue,answer,quantity):
+    session=voice(client)
+    turn(client,session,'BRUFEN 200 MG-17S')
+    result=turn(client,session,answer)
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00013',quantity,'STRIP')
+
+
+def test_repeating_the_medicine_is_not_read_as_a_quantity(client,seed_catalogue):
+    session=voice(client)
+    turn(client,session,'BRUFEN 200 MG-17S')
+    result=turn(client,session,'BRUFEN 200 MG-17S')
+    assert result['order_summary'] is None
+
+
+def test_confirm_after_misheard_medicine_reads_order_back_then_confirms(client,seed_catalogue):
+    session=voice(client)
+    turn(client,session,'brufin 200 MG, 4 FATTE CHIYAYE')
+    assert 'कन्फर्म' in turn(client,session,'order confirm')['assistant_text']
+    # Whisper heard "हाँ" as a medicine name; that opened a new item choice.
+    assert turn(client,session,'CORFLAM')['candidates']
+    again=turn(client,session,'order confirmed.')
+    assert again['order'] is None and 'BRUFEN' in again['assistant_text']
+    confirmed=turn(client,session,'हाँ')
+    assert confirmed['order'] is not None
+    assert [i['medicine_id'] for i in confirmed['order']['line_items']]==['MED-00013']
+
+
+def test_phone_transcription_skips_the_english_retry(monkeypatch):
+    from types import SimpleNamespace
+    from app.core.exceptions import NoSpeechError
+    from app.services.voice.stt import FasterWhisperSTT
+    from app.core.config import get_settings
+    languages=[]
+    class Model:
+        def transcribe(self,path,**kwargs):
+            languages.append(kwargs['language'])
+            text='' if kwargs['language']=='hi' else 'CREMAFFIN'
+            return [SimpleNamespace(text=text)],SimpleNamespace(language=kwargs['language'],language_probability=1,duration=1)
+    adapter=FasterWhisperSTT(get_settings())
+    monkeypatch.setattr(adapter,'_get_model',lambda:Model())
+    with pytest.raises(NoSpeechError):
+        adapter.transcribe(_wav_seconds(1.0),filename='call.wav',language='hi',allow_fallback=False)
+    assert languages==['hi']
+    assert adapter.transcribe(_wav_seconds(1.0),filename='call.wav',language='hi').transcript=='CREMAFFIN'

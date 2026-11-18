@@ -396,3 +396,4 @@ def test_phone_transcription_skips_the_english_retry(monkeypatch):
         adapter.transcribe(_wav_seconds(1.0),filename='call.wav',language='hi',allow_fallback=False)
     assert languages==['hi']
     assert adapter.transcribe(_wav_seconds(1.0),filename='call.wav',language='hi').transcript=='CREMAFFIN'
+#ttrsfx

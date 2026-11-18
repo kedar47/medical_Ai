@@ -16,6 +16,7 @@ NUMBER_WORDS = {
     "teen": 3,
     "char": 4,
     "chaar": 4,
+    "panch": 5,
     "paanch": 5,
     "एक": 1,
     "दो": 2,
@@ -131,6 +132,15 @@ def parse_quantity(text: str):
     matches = list(QUANTITY_PATTERN.finditer(value))
 
     if not matches:
+        return None, None
+
+    values = []
+    for found in matches:
+        raw = found.group(1)
+        quantity = int(raw) if raw.isdigit() else NUMBER_WORDS.get(raw)
+        if quantity is not None and quantity not in values:
+            values.append(quantity)
+    if len(values) > 1:
         return None, None
 
     match = matches[-1]

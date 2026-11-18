@@ -572,7 +572,8 @@ async def handle_media(ws: WebSocket, factory):
         stop_reason, error = "voice_failure", "VOICE"
     except SQLAlchemyError:
         stop_reason, error = "database_failure", "DATABASE"
-    except Exception:
+    except Exception as exc:
+        logger.exception("telephony.media.processing_failure exception=%s", type(exc).__name__)
         stop_reason, error = "processing_failure", "PROCESSING"
     finally:
         cancelled.set()

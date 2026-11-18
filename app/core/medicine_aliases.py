@@ -16,4 +16,12 @@ DEFAULT_MEDICINE_ALIASES: dict[str, str] = {
     "कोलोस्पा": "COLOSPA",
     "सेरोम": "CEROM 500",
     "क्रेमाडाइट": "CREMADIET",
+    "dolo": "DOLO 650",
+    "dolo650": "DOLO 650",
+    "dolo 650": "DOLO 650",
+    "डोलो": "DOLO 650",
+    "crocin": "CROCIN",
+    "krocin": "CROCIN",
+    "क्रोसिन": "CROCIN",
+    "crocin 500": "CROCIN",
 }

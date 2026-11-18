@@ -1,7 +1,10 @@
 import hashlib
+import io
 import logging
 import time
+import unicodedata
 import uuid
+import wave
 from datetime import timedelta
 from functools import lru_cache
 
@@ -11,7 +14,9 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import get_settings
 from app.core.exceptions import NoSpeechError, VoiceError
 from app.database.models import CallLog, CallTurn, Order, VoiceSession, utc_now
+from app.services.telephony.audio_bridge import get_reply
 from app.schemas.voice import VoiceSessionCreate
+from app.services.voice.types import TranscriptionResult
 from app.services.voice_service import VoiceService, _as_utc
 
 logger = logging.getLogger(__name__)
@@ -24,6 +29,63 @@ def local_engines():
     # Model objects are lazy and process-local. Do not reload them on each packet/turn.
     from app.services.voice import build_stt, build_tts
     return build_stt(get_settings()), build_tts(get_settings())
+
+
+@lru_cache(maxsize=1)
+def local_fast_stt():
+    from app.services.voice.stt import FasterWhisperSTT
+
+    settings = get_settings().model_copy(update={
+        "voice_stt_model": "tiny",
+        "voice_stt_temperatures": "0.0",
+        "voice_stt_beam_size": 1,
+        "voice_stt_best_of": 1,
+        "voice_stt_vad_filter": False,
+        "voice_stt_hotwords_enabled": False,
+        "voice_stt_initial_prompt": "",
+        "voice_stt_max_tokens_base": 16,
+        "voice_stt_max_tokens_per_second": 8,
+    })
+    return FasterWhisperSTT(settings)
+
+
+_CONFIRM_NEGATIVE = (
+    "नहीं", "नही", "nahi", "ना", "no", "not", "cancel", "change", "badal", "बदल",
+    "wrong", "galat", "गलत", "remove", "hata", "हटा", "correction", "retry", "wait",
+)
+
+_CONFIRM_AFFIRMATIVE = (
+    "हाँ", "हां", "haan", "han", "yes", "confirm", "confirmed", "sunform", "sunfirm",
+    "कन्फर्म", "कर दो", "कर दें", "कर दी", "ok", "okay", "correct", "sahi", "सही",
+    "theek", "ठीक",
+)
+
+
+def _wav_duration_seconds(audio_bytes: bytes) -> float:
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as reader:
+            return reader.getnframes() / float(reader.getframerate())
+    except Exception:
+        return 0.0
+
+
+def _is_fast_confirmation(transcript: str) -> bool:
+    text = " ".join(unicodedata.normalize("NFKC", transcript).casefold().split())
+    if not text:
+        return False
+    if any(phrase in text for phrase in _CONFIRM_NEGATIVE):
+        return False
+    if any(phrase in text for phrase in _CONFIRM_AFFIRMATIVE):
+        return True
+    from rapidfuzz import fuzz
+
+    pieces = [piece.strip(" .,!?।-") for piece in text.split()]
+    words = ("confirm", "confirmed", "haan", "han", "yes", "okay", "correct")
+    return any(
+        len(piece) >= 4 and fuzz.ratio(piece, word) >= 78
+        for piece in pieces
+        for word in words
+    )
 
 
 class CallManager:
@@ -93,6 +155,10 @@ class CallManager:
         if not call:
             raise VoiceError(404, "Call not found")
         return call
+
+    def awaiting_confirmation(self, call_id):
+        call = self.get(call_id)
+        return self.voice.awaiting_confirmation(call.voice_session_id)
 
     def start_outbound(self, customer_phone, language="hi", client=None):
         from app.services.telephony.exotel_client import ExotelClient, outbound_config_issues
@@ -199,16 +265,43 @@ class CallManager:
         call.status = "PROCESSING"
         self.db.commit()
         started = time.perf_counter()
+        audio_bytes = wav(pcm)
         speech_language = self.voice.speech_language(call.voice_session_id)
         stt_started = time.perf_counter()
+        transcript = None
+        stt_source = "full"
         try:
-            transcript = self.voice.transcribe_audio(
-                wav(pcm),
-                filename="telephone.wav",
-                content_type="audio/wav",
-                language=speech_language,
-                allow_fallback=False,
-            )
+            if self.awaiting_confirmation(call_id) and _wav_duration_seconds(audio_bytes) <= 3.5:
+                fast_started = time.perf_counter()
+                try:
+                    fast = local_fast_stt().transcribe(
+                        audio_bytes,
+                        filename="telephone.wav",
+                        language=speech_language,
+                        allow_fallback=False,
+                    )
+                except (NoSpeechError, VoiceError):
+                    fast = None
+                if fast is not None and _is_fast_confirmation(fast.transcript):
+                    transcript = TranscriptionResult(
+                        transcript="confirm",
+                        language=speech_language,
+                        language_probability=1.0,
+                        duration_seconds=fast.duration_seconds,
+                    )
+                    stt_source = "fast_confirmation"
+                    logger.info(
+                        "telephony.stt.fast_confirmation call_id=%s fast_ms=%s transcript=%s",
+                        call_id, int((time.perf_counter() - fast_started) * 1000), fast.transcript,
+                    )
+            if transcript is None:
+                transcript = self.voice.transcribe_audio(
+                    audio_bytes,
+                    filename="telephone.wav",
+                    content_type="audio/wav",
+                    language=speech_language,
+                    allow_fallback=False,
+                )
         except NoSpeechError:
             # Line noise or a cough is not a caller turn: skip it and keep the
             # call open instead of ending it as a voice failure.
@@ -219,9 +312,9 @@ class CallManager:
             return None
         stt_ms = int((time.perf_counter() - stt_started) * 1000)
         logger.info(
-            "telephony.stt.transcript call_id=%s stt_ms=%s audio_bytes=%s requested_language=%s "
+            "telephony.stt.transcript call_id=%s stt_ms=%s stt_source=%s audio_bytes=%s requested_language=%s "
             "detected_language=%s language_probability=%s duration_seconds=%s transcript=%s",
-            call_id, stt_ms, len(pcm), speech_language, transcript.language,
+            call_id, stt_ms, stt_source, len(pcm), speech_language, transcript.language,
             transcript.language_probability, transcript.duration_seconds, transcript.transcript,
         )
         if cancelled.is_set():
@@ -260,8 +353,20 @@ class CallManager:
         """Synthesize reply text (or one sentence of it) for the telephone."""
         from app.services.telephony.speech import synthesize_full
         from app.services.voice import build_tts
-        return synthesize_full(self.voice._tts or build_tts(get_settings()), text,
-                               language, get_settings().voice_max_tts_chars)
+        from app.services.voice.types import SynthesizedAudio
+
+        settings = get_settings()
+        voice = (
+            settings.voice_tts_voice_hi
+            if language == "hi"
+            else settings.voice_tts_voice_en
+        )
+        cached = get_reply(text, voice, settings.voice_tts_speed)
+        if cached is not None:
+            data, sample_rate, speaker = cached
+            return SynthesizedAudio(data=data, sample_rate=sample_rate, voice=speaker)
+        return synthesize_full(self.voice._tts or build_tts(settings), text,
+                               language, settings.voice_max_tts_chars)
 
     def greeting(self, call_id):
         call = self.get(call_id)

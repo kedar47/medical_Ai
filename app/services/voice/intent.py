@@ -665,24 +665,60 @@ def normalize_spoken_quantities(text: str) -> str:
     )
 
 
-def first_quantity_word(text: str) -> int | None:
-    """First number in an answer to "how many?" ("DO SHRIP" -> 2).
+_AMBIGUOUS_QUANTITY_CONNECTOR = r"(?:or|ya|या|और|to|[-–—])"
+_AMBIGUOUS_QUANTITY_RANGE = re.compile(
+    rf"(?<!\w)(?P<first>\d{{1,3}}|{_QUANTITY_PATTERN})\s*"
+    rf"{_AMBIGUOUS_QUANTITY_CONNECTOR}\s*"
+    rf"(?P<second>\d{{1,3}}|{_QUANTITY_PATTERN})(?!\w)",
+    re.IGNORECASE,
+)
 
-    Only used while the agent is waiting for a quantity; the reply reads the
-    quantity back and the order still needs confirmation.
-    """
-    # Strengths ("200 MG"), pack sizes ("17S") and medicine IDs are not counts.
+
+def quantity_values(text: str) -> list[int]:
     cleaned = normalize_spoken_strengths(normalize_spoken_quantities(text))
     cleaned = re.sub(r"(?<!\w)MED-\d+(?!\w)", " ", cleaned, flags=re.IGNORECASE)
     for regex in (_STRENGTH_WITH_UNIT, _PACK_SIZE):
         cleaned = regex.sub(" ", cleaned)
+    values: list[int] = []
     for token in normalize_text(cleaned).split():
         if token in {"a", "an"}:
             continue
         value = _parse_quantity_value(token)
-        if value is not None:
-            return value
-    return None
+        if value is not None and value not in values:
+            values.append(value)
+    return values
+
+
+def has_ambiguous_quantity(text: str) -> bool:
+    cleaned = normalize_spoken_quantities(text)
+    range_match = _AMBIGUOUS_QUANTITY_RANGE.search(cleaned)
+    if range_match is not None:
+        first = _parse_quantity_value(range_match.group("first"))
+        second = _parse_quantity_value(range_match.group("second"))
+        if first is not None and second is not None and first != second:
+            return True
+
+    values = {
+        value
+        for regex in (_QUANTITY_BEFORE_UNIT, _QUANTITY_AFTER_UNIT)
+        for found in regex.finditer(cleaned)
+        if (value := _parse_quantity_value(found.group("qty"))) is not None
+    }
+    return len(values) > 1
+
+
+def has_ambiguous_quantity_answer(text: str) -> bool:
+    return len(quantity_values(text)) > 1
+
+
+def first_quantity_word(text: str) -> int | None:
+    """Return the only quantity candidate in a bare quantity answer.
+
+    Multiple candidates ("4-8", "five or six") are uncertain, so no number is
+    returned and the caller hears a repeat prompt instead.
+    """
+    values = quantity_values(text)
+    return values[0] if len(values) == 1 else None
 
 
 def extract_quantity_unit(

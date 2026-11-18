@@ -22,14 +22,16 @@ from app.services.telephony.audio_bridge import (
     PLAYBACK_FRAME_BYTES,
     UtteranceBuffer,
     cache_greeting_pcm,
+    cache_reply,
     clear_greeting_cache,
+    clear_reply_cache,
     decode,
     frames,
     get_greeting_pcm,
     pcm_frames,
     wav,
 )
-from app.services.telephony.call_manager import CallManager
+from app.services.telephony.call_manager import CallManager, _is_fast_confirmation
 from app.services.telephony.exotel_adapter import ExotelAdapter
 from app.services.telephony.exotel_client import ExotelClient, outbound_config_issues
 from app.services.voice.types import SynthesizedAudio, TranscriptionResult
@@ -242,6 +244,43 @@ def test_greeting_pcm_cache_resamples_and_frames():
                    for chunk in chunks)
     finally:
         clear_greeting_cache()
+
+
+def test_speak_uses_cached_reply():
+    settings = get_settings()
+    voice = settings.voice_tts_voice_hi
+    clear_reply_cache()
+    try:
+        cache_reply("confirm", voice, settings.voice_tts_speed, b"cached", 8000, "cached-voice")
+        manager = type("Manager", (), {"voice": None})()
+        audio = CallManager.speak(manager, "confirm", "hi")
+        assert audio.data == b"cached"
+        assert audio.sample_rate == 8000
+        assert audio.voice == "cached-voice"
+    finally:
+        clear_reply_cache()
+
+
+@pytest.mark.parametrize("text", [
+    "हाँ",
+    "haan",
+    "confirm",
+    "ORDERS CONFIRMED CURTURE",
+    "yes, confirm kar do",
+])
+def test_fast_confirmation_matches(text):
+    assert _is_fast_confirmation(text)
+
+
+@pytest.mark.parametrize("text", [
+    "नहीं",
+    "no change the quantity",
+    "remove CRAMAFIN",
+    "CREMAFFIN 10",
+    "",
+])
+def test_fast_confirmation_rejects(text):
+    assert not _is_fast_confirmation(text)
 
 
 def test_audio_buffer_bounded():

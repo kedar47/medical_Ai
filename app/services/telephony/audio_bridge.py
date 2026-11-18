@@ -84,6 +84,21 @@ def clear_greeting_cache() -> None:
     _GREETING_CACHE.clear()
 
 
+_REPLY_CACHE: dict[tuple[str, str, float], tuple[bytes, int, str]] = {}
+
+
+def cache_reply(text: str, voice: str, speed: float, data: bytes, sample_rate: int, speaker: str) -> None:
+    _REPLY_CACHE[(text, voice, speed)] = (data, sample_rate, speaker)
+
+
+def get_reply(text: str, voice: str, speed: float) -> tuple[bytes, int, str] | None:
+    return _REPLY_CACHE.get((text, voice, speed))
+
+
+def clear_reply_cache() -> None:
+    _REPLY_CACHE.clear()
+
+
 class UtteranceBuffer:
     """Bounded energy endpointing, not clinical/phonetic recognition.
 

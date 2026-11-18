@@ -75,6 +75,14 @@ _DEVANAGARI_TO_LATIN = {
     "़": "",
 }
 
+_PARACETAMOL_TARGETS = ("dolo 650", "crocin", "paracet")
+_GENERIC_INGREDIENT_GROUPS = {
+    "paracetamol": _PARACETAMOL_TARGETS,
+    "acetaminophen": _PARACETAMOL_TARGETS,
+    "पैरासिटामोल": _PARACETAMOL_TARGETS,
+    "पैरासेटामोल": _PARACETAMOL_TARGETS,
+}
+
 
 def normalize_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
@@ -153,6 +161,25 @@ class MedicineMatchingService:
                 normalized[alias_key] = target_key
         return normalized
 
+    def _generic_groups(self) -> dict[str, tuple[str, ...]]:
+        groups: dict[str, tuple[str, ...]] = {}
+        for name, targets in _GENERIC_INGREDIENT_GROUPS.items():
+            normalized_targets = tuple(normalize_text(target) for target in targets)
+            for key in (name, transliterate_text(name)):
+                normalized_key = normalize_text(key)
+                if normalized_key:
+                    groups[normalized_key] = normalized_targets
+        return groups
+
+    def _candidates_for_names(
+        self, medicines: list[Medicine], names: set[str] | tuple[str, ...], match_type: str
+    ) -> list[MedicineMatchCandidate]:
+        return [
+            _candidate(medicine, match_type)
+            for medicine in sorted(medicines, key=lambda item: item.medicine_id)
+            if normalize_text(medicine.medicine_name) in names
+        ]
+
     def suggestions_from_utterance(self, text: str) -> list[MedicineMatchCandidate]:
         """Known names inside noisy speech are suggestions, never selections.
 
@@ -188,6 +215,7 @@ class MedicineMatchingService:
             for alias in aliases_by_target.get(name_key, set()):
                 targets.add(alias)
                 targets.add(normalize_text(transliterate_text(alias)))
+            targets.update(self._generic_groups().get(name_key, ()))
             scored.append((
                 _candidate(medicine, "FUZZY_SUGGESTION"),
                 _score_text(text, targets),
@@ -226,6 +254,22 @@ class MedicineMatchingService:
         if normalized_text not in by_name and normalized_text in aliases:
             matched_name = aliases[normalized_text]
             match_type = "ALIAS"
+
+        generic_targets = self._generic_groups().get(normalized_text)
+        if generic_targets:
+            candidates = self._candidates_for_names(
+                medicines, set(generic_targets), "ALIAS"
+            )
+            if candidates:
+                return MedicineMatchResponse(
+                    status="CLARIFICATION_REQUIRED",
+                    requested_text=text,
+                    candidates=candidates,
+                    message=(
+                        "The generic name matches multiple catalogue brands. "
+                        "The customer must select the specific medicine_id."
+                    ),
+                )
 
         matched = sorted(
             by_name.get(matched_name, []),

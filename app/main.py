@@ -27,11 +27,15 @@ logger = logging.getLogger(__name__)
 
 def _preload_voice_models() -> None:
     try:
-        from app.services.telephony.audio_bridge import cache_greeting_pcm
+        from app.services.telephony.audio_bridge import cache_greeting_pcm, cache_reply
+        from app.services.telephony.call_manager import local_fast_stt
+        from app.services.telephony.speech import speech_parts
         from app.services.voice import build_stt, build_tts
-        from app.services.voice_service import initial_greeting_text
+        from app.services.voice_service import CONFIRMATION_RESPONSE, initial_greeting_text
 
         build_stt(settings).preload()
+        local_fast_stt().preload()
+        logger.info("Fast confirmation STT preloaded")
         tts = build_tts(settings)
         if tts is not None:
             tts.preload()
@@ -48,6 +52,18 @@ def _preload_voice_models() -> None:
                 )
                 logger.info("telephony.greeting.cached language=%s bytes=%s source_sample_rate=%s pcm_sample_rate=8000",
                             language, size, audio.sample_rate)
+                for part in speech_parts(CONFIRMATION_RESPONSE[language]):
+                    reply_audio = tts.synthesize(part, language=language)
+                    cache_reply(
+                        part,
+                        voice,
+                        settings.voice_tts_speed,
+                        reply_audio.data,
+                        reply_audio.sample_rate,
+                        reply_audio.voice,
+                    )
+                    logger.info("telephony.reply.cached language=%s chars=%s bytes=%s",
+                                language, len(part), len(reply_audio.data))
         logger.info("Voice models preloaded")
     except Exception as exc:  # Startup must not fail when a model is absent.
         logger.warning("Voice model preload skipped: %s", exc.__class__.__name__)

@@ -169,12 +169,12 @@ def test_reimport_updates_changed_records(
     assert medicine.description == "200MG 20'S"
 
 
-def test_demo_csv_contains_exactly_20_unique_records() -> None:
+def test_demo_csv_contains_exactly_26_unique_records() -> None:
     assert DEMO_CSV.is_file(), "data/demo_medicines.csv is missing"
     records = read_medicine_csv(DEMO_CSV)
 
-    assert len(records) == 20
-    assert len({record.medicine_id for record in records}) == 20
+    assert len(records) == 26
+    assert len({record.medicine_id for record in records}) == 26
     assert all(record.medicine_name.strip() for record in records)
     assert all(record.source_row is not None for record in records)
 
@@ -182,9 +182,9 @@ def test_demo_csv_contains_exactly_20_unique_records() -> None:
 def test_demo_csv_import_and_variant_preservation(db_session: Session) -> None:
     result = import_medicines_from_csv(db_session, DEMO_CSV)
 
-    assert result.total == 20
-    assert result.inserted == 20
-    assert db_session.scalar(select(func.count()).select_from(Medicine)) == 20
+    assert result.total == 26
+    assert result.inserted == 26
+    assert db_session.scalar(select(func.count()).select_from(Medicine)) == 26
 
     variants = list(
         db_session.scalars(

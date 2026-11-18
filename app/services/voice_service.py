@@ -54,6 +54,8 @@ from app.services.voice.intent import (
     extract_quantity,
     extract_quantity_unit,
     extract_strength_tokens,
+    has_ambiguous_quantity,
+    has_ambiguous_quantity_answer,
     mentions_last_item,
 )
 from app.services.voice.types import (
@@ -78,6 +80,10 @@ CANCELLED = VoiceSessionStatus.CANCELLED.value
 ENDED = VoiceSessionStatus.ENDED.value
 EXPIRED = VoiceSessionStatus.EXPIRED.value
 ORDER_CONFIRMATION_SOURCE = "VOICE_DEMO"
+CONFIRMATION_RESPONSE = {
+    "hi": "आपका ऑर्डर कन्फर्म हो गया है। धन्यवाद।",
+    "en": "Your order is confirmed. Thank you.",
+}
 
 UNIT_LABELS_HI = {
     OrderUnit.TABLET: "गोली",
@@ -192,6 +198,16 @@ class VoiceService:
         voice = self._get_voice(public_voice_session_id)
         state = self._load_state(voice)
         return state.initial_language or state.language
+
+    def awaiting_confirmation(self, public_voice_session_id: str) -> bool:
+        voice = self._get_voice(public_voice_session_id)
+        state = self._load_state(voice)
+        return (
+            state.pending is None
+            and not state.guard.pending_correction
+            and state.summary_digest is not None
+            and state.guard.can_confirm(state.summary_digest)
+        )
 
     def process_text(
         self,
@@ -460,6 +476,12 @@ class VoiceService:
             return self._handle_end(voice, state, language)
         if parsed.intent == VoiceIntent.HELP:
             return self._handle_help(state, language)
+        if parsed.intent == VoiceIntent.ADD_ITEM and has_ambiguous_quantity(text):
+            return TurnDraft(
+                intent=VoiceIntent.ADD_ITEM,
+                language=language,
+                assistant_text=self._repeat_quantity_text(language),
+            )
 
         if state.pending is not None:
             if state.pending.kind == "candidate":
@@ -669,14 +691,33 @@ class VoiceService:
                 ),
             )
 
-        order_session = self.orders.add_item(
-            voice.order_session.session_id,
-            OrderItemAdd(
+        try:
+            order_session = self.orders.add_item(
+                voice.order_session.session_id,
+                OrderItemAdd(
+                    medicine_id=candidate.medicine_id,
+                    quantity=quantity,
+                    unit=unit,
+                ),
+            )
+        except OrderError:
+            state.pending = VoicePendingState(
+                kind="quantity",
                 medicine_id=candidate.medicine_id,
-                quantity=quantity,
-                unit=unit,
-            ),
-        )
+                medicine_name=candidate.medicine_name,
+                description=candidate.description,
+                quantity=None,
+                unit=None,
+            )
+            return TurnDraft(
+                intent=VoiceIntent.ADD_ITEM,
+                language=language,
+                assistant_text=_text(
+                    "मात्रा 1 से 100 के बीच होनी चाहिए। कृपया मात्रा दोबारा बताएं।",
+                    "Quantity must be between 1 and 100. Please say the quantity again.",
+                    language,
+                ),
+            )
         state.pending = None
         state.summary_digest = None
         state.last_item_id = self._find_added_item_id(
@@ -757,6 +798,12 @@ class VoiceService:
                     language,
                 ),
             )
+        if has_ambiguous_quantity_answer(text):
+            return TurnDraft(
+                intent=VoiceIntent.ADD_ITEM,
+                language=language,
+                assistant_text=self._repeat_quantity_text(language),
+            )
 
         quantity, unit, _ = extract_quantity_unit(text)
         quantity = quantity or pending.quantity
@@ -789,6 +836,14 @@ class VoiceService:
     ) -> TurnDraft:
         state.guard.correction_started()
         state.summary_digest = None
+        if has_ambiguous_quantity(text):
+            summary = self.orders.get_summary(voice.order_session.session_id)
+            return TurnDraft(
+                intent=VoiceIntent.UPDATE_ITEM,
+                language=language,
+                assistant_text=self._repeat_quantity_text(language),
+                order_summary=self._safe_summary(summary, language),
+            )
         items = [{"id": i.id, "medicine_id": i.medicine_id,
                   "medicine_name": i.medicine.medicine_name,
                   "description": i.medicine.description} for i in voice.order_session.items]
@@ -1027,11 +1082,7 @@ class VoiceService:
         return TurnDraft(
             intent=VoiceIntent.CONFIRM_ORDER,
             language=language,
-            assistant_text=_text(
-                "आपका ऑर्डर कन्फर्म हो गया है। धन्यवाद।",
-                "Your order is confirmed. Thank you.",
-                language,
-            ),
+            assistant_text=CONFIRMATION_RESPONSE.get(language, CONFIRMATION_RESPONSE["hi"]),
             order=order,
         )
 
@@ -1380,6 +1431,13 @@ class VoiceService:
             for index, candidate in enumerate(candidates, start=1)
         )
 
+    def _repeat_quantity_text(self, language: str) -> str:
+        return _text(
+            "मात्रा स्पष्ट नहीं है। कृपया एक ही मात्रा दोबारा बताएं, जैसे पांच स्ट्रिप।",
+            "The quantity was unclear. Please say one exact quantity again, for example five strips.",
+            language,
+        )
+
     def _quantity_prompt(
         self,
         candidate: MedicineMatchCandidate,
@@ -1422,8 +1480,8 @@ class VoiceService:
         )
         if summary.can_confirm:
             return _text(
-                f"आपके ऑर्डर में: {items}. क्या मैं ऑर्डर कन्फर्म करूँ?",
-                f"Your order has: {items}. Should I confirm the order?",
+                f"कृपया दवा और मात्रा ध्यान से सुनें। आपके ऑर्डर में: {items}. सही हो तो कन्फर्म कहें।",
+                f"Please listen to the medicine names and exact quantities. Your order has: {items}. If correct, say confirm.",
                 language,
             )
         return _text(

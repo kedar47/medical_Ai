@@ -384,6 +384,13 @@ UNIT_ALIASES: dict[OrderUnit, tuple[str, ...]] = {
         "istrips",
         "shrip",
         "shrips",
+        # "DOESRIPT" for "दो स्ट्रिप" (live call 2026-11-20 21:17 IST).
+        "sript",
+        "sripts",
+        "srip",
+        "srips",
+        "script",
+        "scripts",
         "इस्ट्रिप",
         "स्त्रिप",
         "स्ट्रिप्स",
@@ -670,7 +677,7 @@ def _unit_for_alias(value: str) -> OrderUnit | None:
     return UNIT_ALIAS_LOOKUP.get(value.casefold())
 
 
-_STRIP_WORD = r"(?:strips?|scrips?|stips?|streps?|stripes?|trips?|istrips?|shrips?)"
+_STRIP_WORD = r"(?:strips?|scrips?|stips?|streps?|stripes?|trips?|istrips?|shrips?|sripts?|srips?|scripts?)"
 # "DOESTRIP", "DOSCRIP", "teenstrip": number and unit heard as one word.
 # Hindi strip words in English letters, as Whisper writes them.
 _HINDI_STRIP_WORD = r"(?:patte|patta|pate|patey|pattey|pathe|fatte|phatte|pakta|pakte)"

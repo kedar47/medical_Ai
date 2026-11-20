@@ -534,6 +534,17 @@ class VoiceService:
             # "नहीं" to "BRUFEN 200MG चाहिए या 400MG?" or to a quantity
             # question drops that item only; the order stays as it is.
             state.pending = None
+            resumed = self._resume_deferred(state)
+            if resumed is not None:
+                return TurnDraft(
+                    intent=VoiceIntent.ADD_ITEM,
+                    language=language,
+                    assistant_text=_text(
+                        "ठीक है, वह दवा नहीं जोड़ी। अब " + self._deferred_question(resumed, "hi"),
+                        "Okay, I did not add it. Next: " + self._deferred_question(resumed, "en"),
+                        language,
+                    ),
+                )
             return TurnDraft(
                 intent=VoiceIntent.ADD_ITEM,
                 language=language,
@@ -924,6 +935,15 @@ class VoiceService:
             order_session, language
         )
         label = spoken_name(candidate)
+        # Live call: BRUFEN 200 was chosen, then "DOLO 650" was said before
+        # BRUFEN's quantity. Once DOLO is added, ask about BRUFEN again.
+        state.deferred = [d for d in state.deferred if d.medicine_id != candidate.medicine_id]
+        resumed = self._resume_deferred(state)
+        next_hi = "और कोई दवा चाहिए, या ऑर्डर कन्फर्म करूँ?"
+        next_en = "Anything else, or shall I confirm the order?"
+        if resumed is not None:
+            next_hi = "अब " + self._deferred_question(resumed, "hi")
+            next_en = "Next: " + self._deferred_question(resumed, "en")
         return TurnDraft(
             intent=VoiceIntent.ADD_ITEM,
             language=language,
@@ -931,15 +951,42 @@ class VoiceService:
                 f"ठीक है, {label} की "
                 f"{quantity} {_unit_label(unit, language)} जोड़ दी। "
                 f"ऑर्डर में अभी {summary.line_item_count} आइटम हैं। "
-                "और कोई दवा चाहिए, या ऑर्डर कन्फर्म करूँ?",
+                + next_hi,
                 f"Added {quantity} {_unit_label(unit, language)} of "
                 f"{label}. "
                 f"The draft now has {summary.line_item_count} line item(s). "
-                "Anything else, or shall I confirm the order?",
+                + next_en,
                 language,
             ),
             order_summary=summary,
         )
+
+    def _mark_chosen(self, state, options: int) -> None:
+        if options > 1 and state.pending is not None and state.pending.kind == "quantity":
+            state.pending = state.pending.model_copy(update={"chosen": True})
+
+    def _defer(self, state, pending) -> None:
+        if pending.medicine_id is None or any(
+            d.medicine_id == pending.medicine_id for d in state.deferred
+        ):
+            return
+        state.deferred = (state.deferred + [pending.model_copy(update={"retries": 0})])[-2:]
+
+    def _resume_deferred(self, state):
+        if state.pending is not None or not state.deferred:
+            return None
+        item, state.deferred = state.deferred[0], state.deferred[1:]
+        state.pending = item.model_copy(update={"retries": 0, "chosen": True})
+        return state.pending
+
+    def _deferred_question(self, pending, language: str) -> str:
+        candidate = MedicineMatchCandidate(
+            medicine_id=pending.medicine_id,
+            medicine_name=pending.medicine_name or "",
+            description=pending.description or "",
+            match_type="EXACT_NAME",
+        )
+        return self._quantity_prompt(candidate, pending.quantity, pending.unit, language)
 
     def _handle_candidate_pending(
         self,
@@ -1065,9 +1112,11 @@ class VoiceService:
             unit = None
         quantity = quantity or pending.quantity
         unit = unit or pending.unit
-        return self._add_candidate(
+        draft = self._add_candidate(
             voice, state, selected, quantity, unit, language
         )
+        self._mark_chosen(state, len(pending.candidates))
+        return draft
 
     def _narrow_to_named_medicine(self, voice, state, pending, text, language):
         """Answer to "BRUFEN या DOLO 650?": keep the one medicine the caller
@@ -1112,7 +1161,9 @@ class VoiceService:
             selected = self._select_candidate_from_strength(chosen, text)
         if selected is not None:
             self._log_matching("candidate_pending", text, pending.candidates, selected, "STRICT_MATCH")
-            return self._add_candidate(voice, state, selected, quantity, unit, language)
+            draft = self._add_candidate(voice, state, selected, quantity, unit, language)
+            self._mark_chosen(state, len(pending.candidates))
+            return draft
         state.pending = pending.model_copy(update={
             "candidates": chosen, "match_status": "NAME_HEARD",
             "quantity": quantity, "unit": unit,
@@ -1415,6 +1466,8 @@ class VoiceService:
         )
         switched = self._names_another_medicine(text, {pending.medicine_name or ""})
         if switched is not None:
+            if pending.chosen:
+                self._defer(state, pending)
             return switched(voice, state, language)
 
         parsed_new = self._parse_intent(text, language, None)
@@ -1688,6 +1741,7 @@ class VoiceService:
         state: VoiceState,
         language: str,
     ) -> TurnDraft:
+        state.deferred = []
         if state.guard.pending_correction:
             return TurnDraft(intent=VoiceIntent.CONFIRM_ORDER, language=language,
                 assistant_text=_text("पहले लंबित बदलाव पूरा करें।", "Confirmation is blocked until the pending correction is resolved.", language))

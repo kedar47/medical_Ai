@@ -24,6 +24,10 @@ class VoicePendingState(BaseModel):
     # Unclear answers to this question so far; after three the agent stops
     # asking it and asks for the medicine name again (no endless loop).
     retries: int = Field(default=0, ge=0)
+    # The caller picked this variant from a question ("PAHELA"). If they
+    # name another medicine before saying how many, it is kept and asked
+    # again afterwards instead of being dropped.
+    chosen: bool = False
     # NAME_HEARD: an exact catalogue name was heard and only its variant is
     # open, so the caller may pick it by number, strength or flavour.
     match_status: Literal["CLARIFICATION_REQUIRED", "NOT_FOUND", "NAME_HEARD", "NAMES_HEARD", "STRENGTH_GUESS"] | None = None
@@ -43,6 +47,8 @@ class VoiceState(BaseModel):
     # this language: Hindi-mode Whisper handles English speech, but
     # English-mode Whisper turns Hindi speech into unrelated English words.
     initial_language: Literal["hi", "en"] | None = None
+    # Chosen medicines still waiting for a quantity (see chosen above).
+    deferred: list[VoicePendingState] = Field(default_factory=list)
 
 
 class ParsedIntent(BaseModel):

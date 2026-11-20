@@ -401,3 +401,66 @@ def test_live_call_20_54_replayed(client, demo_catalogue):
     assert cart(say(client, voice, "हाँ")) == [("MED-00013", 2, "STRIP")]
     say(client, voice, "CONFIRM KRO")
     assert say(client, voice, "CONFIRM")["order"] is not None
+
+
+# ---- live call 2026-11-20 21:17 IST ---------------------------------------
+
+def test_chosen_variant_is_asked_again_after_another_medicine(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "ब्रूफेन")
+    assert say(client, voice, "पहला")["assistant_text"] == "BRUFEN 200MG की कितनी स्ट्रिप चाहिए?"
+    assert say(client, voice, "DOLO 650.")["assistant_text"] == "DOLO 650MG की कितनी स्ट्रिप चाहिए?"
+    added = say(client, voice, "2")
+    assert "DOLO 650MG की 2 स्ट्रिप जोड़ दी" in added["assistant_text"]
+    assert added["assistant_text"].endswith("अब BRUFEN 200MG की कितनी स्ट्रिप चाहिए?")
+    both = say(client, voice, "3")
+    assert sorted(cart(both)) == [("MED-00013", 3, "STRIP"), ("MED-00025", 2, "STRIP")]
+    assert "और कोई दवा चाहिए" in both["assistant_text"]
+
+
+def test_kept_medicine_can_be_refused(client, demo_catalogue):
+    voice = session(client)
+    for text in ["ब्रूफेन", "पहला", "DOLO 650.", "2"]:
+        say(client, voice, text)
+    refused = say(client, voice, "नहीं")
+    assert refused["assistant_text"] == "ठीक है, वह दवा नहीं जोड़ी। कौन सी दवा चाहिए?"
+    summary = say(client, voice, "order batao")
+    assert [i["medicine_id"] for i in summary["order_summary"]["items"]] == ["MED-00025"]
+
+
+def test_confirming_drops_a_kept_medicine(client, demo_catalogue):
+    voice = session(client)
+    for text in ["ब्रूफेन", "पहला", "DOLO 650."]:
+        say(client, voice, text)
+    say(client, voice, "2")  # asks about BRUFEN next
+    summary = say(client, voice, "order confirm")
+    assert "DOLO 650MG" in summary["assistant_text"] and "BRUFEN" not in summary["assistant_text"]
+    confirmed = say(client, voice, "हाँ")
+    assert [i["medicine_id"] for i in confirmed["order"]["line_items"]] == ["MED-00025"]
+
+
+def test_named_once_then_replaced_is_not_asked_again(client, demo_catalogue):
+    # No variant was chosen for DOLO 650: switching is a change of mind.
+    voice = session(client)
+    say(client, voice, "dolo")
+    switched = say(client, voice, "brufen 200 two strips")
+    assert cart(switched) == [("MED-00013", 2, "STRIP")]
+    assert "DOLO" not in switched["assistant_text"]
+
+
+@pytest.mark.parametrize("answer", ["DOESRIPT AYI", "do sript", "2 script"])
+def test_sript_spelling_of_strip(client, demo_catalogue, answer):
+    voice = session(client)
+    say(client, voice, "dolo")
+    assert cart(say(client, voice, answer)) == [("MED-00025", 2, "STRIP")]
+
+
+def test_live_call_21_17_replayed(client, demo_catalogue):
+    voice = session(client)
+    for text in ["meche brufan dabai chahiye.", "ciaaabsoo", "AHAHLA", "PAHELA", "DOLO 650."]:
+        say(client, voice, text)
+    after_dolo = say(client, voice, "DOESRIPT AYI")
+    assert cart(after_dolo) == [("MED-00025", 2, "STRIP")]
+    assert after_dolo["assistant_text"].endswith("अब BRUFEN 200MG की कितनी स्ट्रिप चाहिए?")
+    final = say(client, voice, "DO")
+    assert sorted(cart(final)) == [("MED-00013", 2, "STRIP"), ("MED-00025", 2, "STRIP")]

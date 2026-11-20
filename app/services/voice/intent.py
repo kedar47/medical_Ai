@@ -880,7 +880,9 @@ def extract_ordinal(text: str) -> int | None:
 
 
 def extract_strength_tokens(text: str) -> set[str]:
-    remaining = normalize_spoken_strengths(extract_quantity_unit(text)[2])
+    without_id = re.sub(r"(?<!\w)MED-\d+(?!\w)", " ", text, flags=re.IGNORECASE)
+    remaining = normalize_spoken_strengths(extract_quantity_unit(without_id)[2])
+    remaining = _PACK_SIZE.sub(" ", remaining)
     return {str(int(value)) for value in _DIGITS.findall(remaining)}
 
 

@@ -26,6 +26,13 @@ def seed_spoken_catalogue(db_session: Session) -> None:
                 source_row=22,
             ),
             Medicine(
+                medicine_id="MED-00013",
+                medicine_name="BRUFEN",
+                description="200MG 15'S",
+                source_serial_number="5",
+                source_row=13,
+            ),
+            Medicine(
                 medicine_id="MED-00025",
                 medicine_name="DOLO 650",
                 description="TAB 650MG 15'S",
@@ -125,7 +132,7 @@ def test_noisy_wrong_strength_is_not_auto_added(
     assert "DOLO 650" in result["assistant_text"]
 
 
-def test_invalid_quantity_turn_keeps_call_alive(
+def test_new_medicine_after_pending_quantity_switches(
     client: TestClient,
     session_factory,
     seed_spoken_catalogue: None,
@@ -136,14 +143,14 @@ def test_invalid_quantity_turn_keeps_call_alive(
     first = turn(client, session["voice_session_id"], "add dolo 650")
     assert first["order_summary"] is None
 
-    invalid = turn(
+    switched = turn(
         client, session["voice_session_id"], "brufin 200, pundraya"
     )
-    assert invalid["order_summary"] is None
-    assert "100" in invalid["assistant_text"]
+    assert switched["order_summary"] is None
+    assert "DOLO 650" not in switched["assistant_text"]
 
     recovered = turn(client, session["voice_session_id"], "four strips")
     assert recovered["order_summary"]["line_item_count"] == 1
     item = recovered["order_summary"]["items"][0]
-    assert item["medicine_id"] == "MED-00025"
+    assert item["medicine_id"] == "MED-00013"
     assert item["quantity"] == 4

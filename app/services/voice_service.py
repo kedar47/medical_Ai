@@ -41,6 +41,15 @@ from app.schemas.voice import (
     VoiceTurnResponse,
 )
 from app.services.matching_service import MedicineMatchingService, normalize_text
+from app.services.medicine_attributes import (
+    MedicineAttributes,
+    attributes_from_text,
+    not_found_text,
+    pack_size_tokens,
+    select_strict_candidate,
+    spoken_name,
+    strictly_matches,
+)
 from app.services.order_service import OrderService
 from app.services.voice import build_intent_parser, build_stt, build_tts
 from app.services.voice.intent import (
@@ -58,6 +67,7 @@ from app.services.voice.intent import (
     has_ambiguous_quantity,
     has_ambiguous_quantity_answer,
     mentions_last_item,
+    quantity_values,
 )
 from app.services.voice.types import (
     IntentParser,
@@ -122,7 +132,7 @@ def _text(hi: str, en: str, language: str) -> str:
 
 def initial_greeting_text(language: str) -> str:
     return _text(
-        "नमस्ते, आपका मेडीक्योर में स्वागत है। आप कौन सी टैबलेट ऑर्डर करना चाहते हैं, और कितनी मात्रा में चाहिए?",
+        "नमस्ते! मैं आपका मेडिसिन ऑर्डर असिस्टेंट हूँ। बताइए, आपको कौन-सी दवाई चाहिए?",
         "Hello, welcome to Medicure. Which tablet would you like to order, and in what quantity?",
         language,
     )
@@ -154,6 +164,75 @@ class VoiceService:
         self._stt = stt
         self._tts = tts
         self._intent_parser = intent_parser
+
+    def _spoken_attributes(self, text: str) -> MedicineAttributes:
+        return attributes_from_text(text, strengths=extract_strength_tokens(text))
+
+    def _selection_strengths(
+        self,
+        text: str,
+        candidates: list[MedicineMatchCandidate],
+    ) -> set[str]:
+        strengths = extract_strength_tokens(text)
+        if candidates:
+            shared = set.intersection(
+                *(pack_size_tokens(candidate.description or "") for candidate in candidates)
+            )
+            strengths -= shared
+        return strengths
+
+    def _selection_attributes(
+        self,
+        text: str,
+        candidates: list[MedicineMatchCandidate],
+    ) -> MedicineAttributes:
+        return attributes_from_text(
+            text, strengths=self._selection_strengths(text, candidates)
+        )
+
+    def _has_ambiguous_strength_only(self, text: str) -> bool:
+        strengths = extract_strength_tokens(text)
+        if len(strengths) < 2:
+            return False
+        cleaned = text
+        for strength in sorted(strengths, key=len, reverse=True):
+            cleaned = re.sub(rf"(?<!\d){re.escape(strength)}(?!\d)", " ", cleaned)
+        return len(quantity_values(cleaned)) <= 1
+
+    def _not_found_draft(self, state: VoiceState, language: str) -> TurnDraft:
+        state.pending = None
+        state.summary_digest = None
+        return TurnDraft(
+            intent=VoiceIntent.ADD_ITEM,
+            language=language,
+            assistant_text=not_found_text(language),
+        )
+
+    def _explicit_add_request(self, text: str) -> bool:
+        normalized = normalize_text(text)
+        return re.search(
+            r"(?:^|\s)(?:add|jo[dr]|जोड़\w*|डाल\w*)(?:\s|$)",
+            normalized,
+            re.IGNORECASE,
+        ) is not None
+
+    def _log_matching(
+        self,
+        stage: str,
+        text: str,
+        candidates: list[MedicineMatchCandidate],
+        selected: MedicineMatchCandidate | None,
+        status: str,
+    ) -> None:
+        logger.info(
+            "voice.medicine.match stage=%s status=%s text_len=%d strengths=%s candidate_ids=%s selected_id=%s",
+            stage,
+            status,
+            len(text),
+            ",".join(sorted(self._spoken_attributes(text).strengths)) or "-",
+            ",".join(sorted(candidate.medicine_id for candidate in candidates)) or "-",
+            selected.medicine_id if selected is not None else "-",
+        )
 
     def create_session(
         self, payload: VoiceSessionCreate
@@ -477,7 +556,11 @@ class VoiceService:
             return self._handle_end(voice, state, language)
         if parsed.intent == VoiceIntent.HELP:
             return self._handle_help(state, language)
-        if parsed.intent == VoiceIntent.ADD_ITEM and has_ambiguous_quantity(text):
+        if (
+            parsed.intent == VoiceIntent.ADD_ITEM
+            and has_ambiguous_quantity(text)
+            and not self._has_ambiguous_strength_only(text)
+        ):
             return TurnDraft(
                 intent=VoiceIntent.ADD_ITEM,
                 language=language,
@@ -575,6 +658,12 @@ class VoiceService:
                 description=medicine.description,
                 match_type="EXACT_NAME",
             )
+            if not strictly_matches(
+                candidate, self._selection_attributes(text, [candidate])
+            ):
+                self._log_matching("add_id", text, [candidate], None, "ATTRIBUTE_CONFLICT")
+                return self._not_found_draft(state, language)
+            self._log_matching("add_id", text, [candidate], candidate, "STRICT_MATCH")
             return self._add_candidate(
                 voice, state, candidate, quantity, unit, language
             )
@@ -591,21 +680,30 @@ class VoiceService:
                 ),
             )
 
+        mentioned = self.matching.suggestions_from_utterance(text)
         result = self.matching.search(query)
         if result.status == "NOT_FOUND":
-            mentioned = self.matching.suggestions_from_utterance(query)
             if mentioned:
                 selected = self._exact_name_with_strength(mentioned, query, text)
                 if selected is not None:
+                    self._log_matching("add_alias", text, mentioned, selected, "STRICT_MATCH")
                     return self._add_candidate(
                         voice, state, selected, quantity, unit, language
                     )
                 result = result.model_copy(update={"candidates": mentioned})
         if result.status == "EXACT_MATCH":
+            selected = select_strict_candidate(
+                result.candidates,
+                self._selection_attributes(text, result.candidates),
+            )
+            if selected is None:
+                self._log_matching("add_exact", text, result.candidates, None, "ATTRIBUTE_CONFLICT")
+                return self._not_found_draft(state, language)
+            self._log_matching("add_exact", text, result.candidates, selected, "STRICT_MATCH")
             return self._add_candidate(
                 voice,
                 state,
-                result.candidates[0],
+                selected,
                 quantity,
                 unit,
                 language,
@@ -615,9 +713,11 @@ class VoiceService:
                 result.candidates, text
             )
             if selected is not None:
+                self._log_matching("add_variant", text, result.candidates, selected, "STRICT_MATCH")
                 return self._add_candidate(
                     voice, state, selected, quantity, unit, language
                 )
+            self._log_matching("add_variant", text, result.candidates, None, "CLARIFICATION_REQUIRED")
             state.pending = VoicePendingState(
                 kind="candidate",
                 candidates=result.candidates,
@@ -636,26 +736,25 @@ class VoiceService:
             )
 
         if result.candidates:
-            # One exact catalogue name was heard among unclear words: only the
-            # variant is open (live call: "LOSCHIT, LOSCHIT, CREMAFFIN").
-            spoken_strengths = extract_strength_tokens(text)
-            candidate_strengths = set().union(
-                *(description_strength_tokens(c.description) for c in result.candidates)
-            )
-            strength_conflict = bool(spoken_strengths - candidate_strengths)
+            spoken = self._selection_attributes(text, result.candidates)
+            strict_candidates = [
+                candidate for candidate in result.candidates
+                if strictly_matches(candidate, spoken)
+            ]
             name_heard = (
                 bool(mentioned)
-                and not strength_conflict
+                and bool(strict_candidates)
                 and len(
                     {normalize_text(c.medicine_name) for c in result.candidates}
                 ) == 1
             )
             if name_heard and len(result.candidates) == 1:
-                # "COG, CLOMIN, F": the only CLOMIN in the catalogue. Nothing
-                # to choose; ask the quantity (read back before confirming).
+                selected = strict_candidates[0]
+                self._log_matching("add_fuzzy", text, result.candidates, selected, "STRICT_MATCH")
                 return self._add_candidate(
-                    voice, state, result.candidates[0], quantity, unit, language
+                    voice, state, selected, quantity, unit, language
                 )
+            self._log_matching("add_fuzzy", text, result.candidates, None, "CLARIFICATION_REQUIRED")
             state.pending = VoicePendingState(
                 kind="candidate",
                 candidates=result.candidates,
@@ -672,15 +771,8 @@ class VoiceService:
                     result.candidates, language, fuzzy=not name_heard
                 ),
             )
-        return TurnDraft(
-            intent=VoiceIntent.ADD_ITEM,
-            language=language,
-            assistant_text=_text(
-                "यह दवा स्वीकृत कैटलॉग में नहीं मिली। कृपया नाम दोबारा या थोड़ा साफ़ बोलें।",
-                "I could not find that medicine in the approved catalogue. Please repeat or clarify the name.",
-                language,
-            ),
-        )
+        self._log_matching("add", text, [], None, "NOT_FOUND")
+        return self._not_found_draft(state, language)
 
     def _add_candidate(
         self,
@@ -747,15 +839,16 @@ class VoiceService:
         summary = self._safe_summary_from_session(
             order_session, language
         )
+        label = spoken_name(candidate)
         return TurnDraft(
             intent=VoiceIntent.ADD_ITEM,
             language=language,
             assistant_text=_text(
-                f"ठीक है, {candidate.medicine_name} ({candidate.description}) की "
+                f"ठीक है, {label} की "
                 f"{quantity} {_unit_label(unit, language)} जोड़ दी। "
                 f"ऑर्डर में अभी {summary.line_item_count} आइटम हैं।",
                 f"Added {quantity} {_unit_label(unit, language)} of "
-                f"{candidate.medicine_name} ({candidate.description}). "
+                f"{label}. "
                 f"The draft now has {summary.line_item_count} line item(s).",
                 language,
             ),
@@ -782,13 +875,43 @@ class VoiceService:
                 ),
             )
 
+        switched = self._names_another_medicine(
+            text, {c.medicine_name for c in pending.candidates}
+        )
+        if switched is not None:
+            return switched(voice, state, language)
+
+        parsed_new = self._parse_intent(text, language, None)
+        if (
+            self._explicit_add_request(text)
+            and parsed_new.medicine_query
+            and not any(
+                self._mentions_candidate_name(text, candidate)
+                for candidate in pending.candidates
+            )
+        ):
+            state.pending = None
+            return self._handle_add(voice, state, parsed_new, text, language)
+
+        spoken = self._selection_attributes(text, pending.candidates)
         selected = self._select_candidate(pending, text)
         if selected is None:
-            switched = self._names_another_medicine(
-                text, {c.medicine_name for c in pending.candidates}
+            explicit_name = any(
+                self._mentions_candidate_name(text, candidate)
+                for candidate in pending.candidates
             )
-            if switched is not None:
-                return switched(voice, state, language)
+            if explicit_name or (
+                spoken.strengths and len(pending.candidates) == 1
+            ):
+                self._log_matching(
+                    "candidate_pending", text, pending.candidates, None,
+                    "ATTRIBUTE_CONFLICT",
+                )
+                return self._not_found_draft(state, language)
+            self._log_matching(
+                "candidate_pending", text, pending.candidates, None,
+                "CLARIFICATION_REQUIRED",
+            )
             return TurnDraft(
                 intent=VoiceIntent.SELECT_CANDIDATE,
                 language=language,
@@ -798,6 +921,10 @@ class VoiceService:
                 ),
             )
 
+        self._log_matching(
+            "candidate_pending", text, pending.candidates, selected,
+            "STRICT_MATCH",
+        )
         quantity, unit, _ = extract_quantity_unit(text)
         quantity = quantity or pending.quantity
         unit = unit or pending.unit
@@ -840,16 +967,43 @@ class VoiceService:
                     language,
                 ),
             )
+        pending_candidate = MedicineMatchCandidate(
+            medicine_id=pending.medicine_id,
+            medicine_name=pending.medicine_name or "",
+            description=pending.description or "",
+            match_type="EXACT_NAME",
+        )
+        switched = self._names_another_medicine(text, {pending.medicine_name or ""})
+        if switched is not None:
+            return switched(voice, state, language)
+
+        parsed_new = self._parse_intent(text, language, None)
+        mentions_pending = self._mentions_candidate_name(text, pending_candidate)
+        new_medicine = bool(parsed_new.medicine_query) and not mentions_pending
+        if new_medicine and self._explicit_add_request(text):
+            state.pending = None
+            return self._handle_add(voice, state, parsed_new, text, language)
+
+        spoken = self._selection_attributes(text, [pending_candidate])
+        enforce_attributes = bool(
+            parsed_new.medicine_id
+            or spoken.strength_units
+            or mentions_pending
+            or (new_medicine and self._explicit_add_request(text))
+        )
+        if enforce_attributes and not strictly_matches(pending_candidate, spoken):
+            self._log_matching(
+                "quantity_pending", text, [pending_candidate], None,
+                "ATTRIBUTE_CONFLICT",
+            )
+            return self._not_found_draft(state, language)
+
         if has_ambiguous_quantity_answer(text):
             return TurnDraft(
                 intent=VoiceIntent.ADD_ITEM,
                 language=language,
                 assistant_text=self._repeat_quantity_text(language),
             )
-
-        switched = self._names_another_medicine(text, {pending.medicine_name or ""})
-        if switched is not None:
-            return switched(voice, state, language)
 
         quantity, unit, _ = extract_quantity_unit(text)
         quantity = quantity or pending.quantity
@@ -862,14 +1016,12 @@ class VoiceService:
             # "DO SHRIP", "the two strip": the count is there, the unit garbled.
             quantity = first_quantity_word(text)
         unit = unit or pending.unit
-        candidate = MedicineMatchCandidate(
-            medicine_id=pending.medicine_id,
-            medicine_name=pending.medicine_name or "",
-            description=pending.description or "",
-            match_type="EXACT_NAME",
+        self._log_matching(
+            "quantity_pending", text, [pending_candidate], pending_candidate,
+            "STRICT_MATCH",
         )
         return self._add_candidate(
-            voice, state, candidate, quantity, unit, language
+            voice, state, pending_candidate, quantity, unit, language
         )
 
     def _handle_update(
@@ -961,9 +1113,9 @@ class VoiceService:
             intent=VoiceIntent.UPDATE_ITEM,
             language=language,
             assistant_text=_text(
-                f"आइटम अपडेट हो गया: {updated.medicine_name} "
+                f"आइटम अपडेट हो गया: {spoken_name(updated)} "
                 f"{updated.quantity} {_unit_label(updated.unit, language)}.",
-                f"Updated the item: {updated.medicine_name} "
+                f"Updated the item: {spoken_name(updated)} "
                 f"{updated.quantity} {_unit_label(updated.unit, language)}.",
                 language,
             ),
@@ -986,9 +1138,9 @@ class VoiceService:
             )
 
         medicine_name = (
-            item.medicine.medicine_name
+            spoken_name(item.medicine)
             if item.medicine is not None
-            else item.medicine_id
+            else _text("दवा", "the medicine", language)
         )
         order_session = self.orders.delete_item(
             voice.order_session.session_id, item.id
@@ -1249,7 +1401,11 @@ class VoiceService:
         pending: VoicePendingState,
         text: str,
     ) -> MedicineMatchCandidate | None:
-        candidates = pending.candidates
+        spoken = self._selection_attributes(text, pending.candidates)
+        candidates = [
+            candidate for candidate in pending.candidates
+            if strictly_matches(candidate, spoken)
+        ]
         medicine_id = contains_medicine_id(text)
         if medicine_id is not None:
             for candidate in candidates:
@@ -1266,7 +1422,7 @@ class VoiceService:
             for candidate in candidates
             if self._mentions_candidate_name(text, candidate)
         ]
-        strength_tokens = extract_strength_tokens(text)
+        strength_tokens = self._selection_strengths(text, pending.candidates)
 
         strength_selected = self._select_candidate_from_strength(
             candidates, text
@@ -1290,14 +1446,16 @@ class VoiceService:
                     return matching[0]
             return None
 
-        word_selected = self._select_candidate_from_words(candidates, text)
-        if word_selected is not None:
+        word_selected = self._select_candidate_from_words(pending.candidates, text)
+        if word_selected is not None and strictly_matches(word_selected, spoken):
             return word_selected
         if len(explicit_name) == 1:
             return explicit_name[0]
         ordinal = extract_ordinal(text)
-        if ordinal is not None and 1 <= ordinal <= len(candidates):
-            return candidates[ordinal - 1]
+        if ordinal is not None and 1 <= ordinal <= len(pending.candidates):
+            ordinal_candidate = pending.candidates[ordinal - 1]
+            if strictly_matches(ordinal_candidate, spoken):
+                return ordinal_candidate
         return None
 
     def _select_candidate_from_words(
@@ -1357,20 +1515,15 @@ class VoiceService:
         candidates: list[MedicineMatchCandidate],
         text: str,
     ) -> MedicineMatchCandidate | None:
-        strength_tokens = extract_strength_tokens(text)
-        if candidates:
-            # A number every option shares (the "15" in "15'S" pack size)
-            # cannot tell the options apart, so it must not block a choice.
-            shared = set.intersection(
-                *(description_strength_tokens(c.description) for c in candidates)
-            )
-            strength_tokens -= shared
+        strength_tokens = self._selection_strengths(text, candidates)
         if not strength_tokens:
             return None
+        spoken = attributes_from_text(text, strengths=strength_tokens)
         matches = [
             candidate
             for candidate in candidates
-            if strength_tokens
+            if strictly_matches(candidate, spoken)
+            and strength_tokens
             & description_strength_tokens(candidate.description)
         ]
         if len(matches) == 1:
@@ -1507,8 +1660,7 @@ class VoiceService:
         self, candidates: list[MedicineMatchCandidate]
     ) -> str:
         return " ".join(
-            f"{index}) {candidate.medicine_name} "
-            f"{' '.join(candidate.description.split())}"
+            f"{index}) {spoken_name(candidate, alternatives=candidates)}"
             for index, candidate in enumerate(candidates, start=1)
         )
 
@@ -1526,7 +1678,7 @@ class VoiceService:
         unit: OrderUnit | None,
         language: str,
     ) -> str:
-        label = f"{candidate.medicine_name} ({candidate.description})"
+        label = spoken_name(candidate)
         if quantity is None and unit is None:
             return _text(
                 f"{label} के लिए मात्रा और इकाई बताएं, जैसे दो स्ट्रिप।",
@@ -1555,7 +1707,7 @@ class VoiceService:
                 language,
             )
         items = "; ".join(
-            f"{index}) {item.medicine_name} ({item.description}) - "
+            f"{index}) {spoken_name(item, alternatives=summary.items)} - "
             f"{item.quantity} {_unit_label(item.unit, language)}"
             for index, item in enumerate(summary.items, start=1)
         )

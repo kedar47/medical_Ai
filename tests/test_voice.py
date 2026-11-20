@@ -128,7 +128,9 @@ def test_voice_status_and_session_lifecycle(
     assert session["order_session_id"].startswith("session_")
     assert session["status"] == "ACTIVE"
     assert session["language"] == "hi"
-    assert "नमस्ते" in session["message"]
+    assert session["message"] == (
+        "नमस्ते! मैं आपका मेडिसिन ऑर्डर असिस्टेंट हूँ। बताइए, आपको कौन-सी दवाई चाहिए?"
+    )
 
     fetched = client.get(
         f"/voice/sessions/{session['voice_session_id']}"

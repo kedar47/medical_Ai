@@ -1,0 +1,297 @@
+"""Whole conversations against the real demo catalogue (data/demo_medicines.csv).
+
+Expected behaviour for the client demo:
+- a medicine name alone is enough; one variant goes straight to "how many?",
+- several variants get one natural question ("BRUFEN 200MG चाहिए, 400MG या
+  600MG?") answered by strength, number, flavour, form or पहला/दूसरा,
+- "नहीं" drops the item being chosen, unclear answers never loop forever,
+- a number heard on its own ("650.") is matched to the catalogue.
+"""
+from pathlib import Path
+
+import pytest
+
+from app.services.import_service import import_medicines_from_csv
+
+CSV = Path(__file__).resolve().parents[1] / "data" / "demo_medicines.csv"
+
+
+@pytest.fixture
+def demo_catalogue(db_session):
+    import_medicines_from_csv(db_session, CSV)
+
+
+def session(client, language="hi"):
+    return client.post("/voice/sessions", json={"language": language}).json()
+
+
+def say(client, voice, text):
+    response = client.post(
+        f"/voice/sessions/{voice['voice_session_id']}/turns",
+        json={"text": text, "speak": False},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def cart(result):
+    summary = result.get("order_summary") or {}
+    return [(i["medicine_id"], i["quantity"], i["unit"]) for i in summary.get("items", [])]
+
+
+# ---- name only -------------------------------------------------------------
+
+@pytest.mark.parametrize("answer", ["400", "400 mg", "चार सौ", "char sau", "car so", "दूसरा", "400 वाला", "BRUFEN 400"])
+def test_name_only_asks_strength_naturally_then_how_many(client, demo_catalogue, answer):
+    voice = session(client)
+    asked = say(client, voice, "ब्रूफेन")
+    assert asked["assistant_text"] == "BRUFEN 200MG चाहिए, 400MG या 600MG?"
+    picked = say(client, voice, answer)
+    assert picked["assistant_text"] == "BRUFEN 400MG की कितनी स्ट्रिप चाहिए?"
+    added = say(client, voice, "दो")
+    assert cart(added) == [("MED-00014", 2, "STRIP")]
+    assert "और कोई दवा चाहिए" in added["assistant_text"]
+
+
+def test_name_and_quantity_then_strength_adds_at_once(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "brufen ke do patte")
+    assert cart(say(client, voice, "600")) == [("MED-00015", 2, "STRIP")]
+
+
+@pytest.mark.parametrize("name", ["dolo", "डोलो", "DOLO 650", "dolo650"])
+def test_single_variant_name_goes_straight_to_how_many(client, demo_catalogue, name):
+    voice = session(client)
+    asked = say(client, voice, name)
+    assert asked["assistant_text"] == "DOLO 650MG की कितनी स्ट्रिप चाहिए?"
+    assert cart(say(client, voice, "3")) == [("MED-00025", 3, "STRIP")]
+
+
+@pytest.mark.parametrize("answer,medicine", [("mixed fruit", "MED-00022"), ("plus", "MED-00023"), ("mint", "MED-00021"), ("पहला", "MED-00021")])
+def test_syrup_flavours(client, demo_catalogue, answer, medicine):
+    voice = session(client)
+    asked = say(client, voice, "cremaffin")
+    assert asked["assistant_text"] == "CREMAFFIN MINT PLAIN चाहिए, MIXED FRUIT या PLUS?"
+    picked = say(client, voice, answer)
+    assert "की कितनी बोतल चाहिए?" in picked["assistant_text"]
+    assert cart(say(client, voice, "1")) == [(medicine, 1, "BOTTLE")]
+
+
+@pytest.mark.parametrize("answer,medicine", [("गोली वाली", "MED-00007"), ("tablet", "MED-00007"), ("syrup", "MED-00006"), ("60 ml", "MED-00006")])
+def test_tablet_or_liquid(client, demo_catalogue, answer, medicine):
+    voice = session(client)
+    asked = say(client, voice, "corflam")
+    assert asked["assistant_text"] == "CORFLAM SUSPENSION 60ML चाहिए या TAB?"
+    picked = say(client, voice, answer)
+    assert picked["order_summary"] is None and "कितनी" in picked["assistant_text"]
+    assert cart(say(client, voice, "2"))[0][0] == medicine
+
+
+def test_injection_choice_and_unit(client, demo_catalogue):
+    voice = session(client)
+    assert say(client, voice, "arachitol")["assistant_text"] == "ARACHITOL INJ चाहिए या NANO SUGAR FREE?"
+    picked = say(client, voice, "injection")
+    assert "ARACHITOL INJ" in picked["assistant_text"] and "मात्रा" in picked["assistant_text"]
+    assert cart(say(client, voice, "2 box")) == [("MED-00011", 2, "BOX")]
+
+
+def test_generic_paracetamol_offers_the_brands(client, demo_catalogue):
+    voice = session(client)
+    asked = say(client, voice, "paracetamol")
+    assert "DOLO 650MG" in asked["assistant_text"] and "CROCIN 500MG" in asked["assistant_text"]
+    picked = say(client, voice, "crocin")
+    assert picked["assistant_text"] == "CROCIN 500MG की कितनी स्ट्रिप चाहिए?"
+
+
+# ---- no, repeats, retries -------------------------------------------------
+
+@pytest.mark.parametrize("negative", ["नहीं", "nahi", "no", "नहीं चाहिए", "NO!"])
+def test_no_drops_the_item_being_chosen(client, demo_catalogue, negative):
+    voice = session(client)
+    say(client, voice, "ब्रूफेन")
+    dropped = say(client, voice, negative)
+    assert dropped["assistant_text"] == "ठीक है, वह दवा नहीं जोड़ी। कौन सी दवा चाहिए?"
+    # The next answer is a fresh request, not a variant choice.
+    assert say(client, voice, "dolo")["assistant_text"] == "DOLO 650MG की कितनी स्ट्रिप चाहिए?"
+
+
+def test_no_during_quantity_drops_only_that_item(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "dolo")
+    say(client, voice, "2")
+    say(client, voice, "crocin")
+    dropped = say(client, voice, "नहीं")
+    assert "नहीं जोड़ी" in dropped["assistant_text"]
+    summary = say(client, voice, "order batao")
+    assert [i["medicine_id"] for i in summary["order_summary"]["items"]] == ["MED-00025"]
+
+
+def test_repeating_only_the_name_asks_again_with_a_hint(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "ब्रूफेन")
+    again = say(client, voice, "brufen")
+    assert again["order_summary"] is None
+    assert again["assistant_text"].startswith("BRUFEN 200MG चाहिए, 400MG या 600MG?")
+    assert "पहला" in again["assistant_text"]
+
+
+def test_unclear_answers_stop_after_three_tries(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "ब्रूफेन")
+    replies = [say(client, voice, junk)["assistant_text"] for junk in ["NG", "KU", "NIRU"]]
+    assert "दवा का नाम दोबारा बताएं" in replies[-1]
+    assert say(client, voice, "dolo")["assistant_text"] == "DOLO 650MG की कितनी स्ट्रिप चाहिए?"
+
+
+# ---- only a number heard -------------------------------------------------
+
+@pytest.mark.parametrize("heard,prompt", [
+    ("650.", "DOLO 650MG की कितनी स्ट्रिप चाहिए?"),
+    ("600.", "BRUFEN 600MG की कितनी स्ट्रिप चाहिए?"),
+    ("छह सौ पचास", "DOLO 650MG की कितनी स्ट्रिप चाहिए?"),
+    ("325 mg", "DISPRIN 325MG की कितनी स्ट्रिप चाहिए?"),
+])
+def test_strength_heard_alone_offers_the_matching_medicine(client, demo_catalogue, heard, prompt):
+    assert say(client, session(client), heard)["assistant_text"] == prompt
+
+
+def test_strength_shared_by_two_medicines_asks_which(client, demo_catalogue):
+    voice = session(client)
+    asked = say(client, voice, "500.")
+    assert "CEROM 500" in asked["assistant_text"] and "CROCIN 500MG" in asked["assistant_text"]
+    assert say(client, voice, "crocin")["assistant_text"] == "CROCIN 500MG की कितनी स्ट्रिप चाहिए?"
+
+
+@pytest.mark.parametrize("heard", ["550.", "2", "5% 5%"])
+def test_number_without_a_match_asks_for_the_name(client, demo_catalogue, heard):
+    result = say(client, session(client), heard)
+    assert result["order_summary"] is None and not result["candidates"]
+
+
+def test_other_medicines_strength_during_quantity_switches(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "paracet")
+    switched = say(client, voice, "650.")
+    assert switched["assistant_text"] == "DOLO 650MG की कितनी स्ट्रिप चाहिए?"
+    assert cart(say(client, voice, "2")) == [("MED-00025", 2, "STRIP")]
+
+
+def test_own_strength_during_quantity_is_not_a_count(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "dolo")
+    again = say(client, voice, "650.")
+    assert "DOLO 650MG की कितनी स्ट्रिप चाहिए?" in again["assistant_text"]
+    assert "1 से 100" not in again["assistant_text"]
+
+
+def test_unclear_quantity_answers_get_clearer_then_start_over(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "dolo")
+    first = say(client, voice, "NG")["assistant_text"]
+    second = say(client, voice, "DOCH")["assistant_text"]
+    third = say(client, voice, "PIPE POTCH")["assistant_text"]
+    assert first.startswith("माफ़ कीजिए") and "बस संख्या बोलें" in first
+    assert "नहीं बोलें" in second and second == third
+    gave_up = say(client, voice, "MMMM")["assistant_text"]
+    assert "दवा का नाम दोबारा बताएं" in gave_up
+
+
+def test_clear_number_after_unclear_answers_still_adds(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "dolo")
+    say(client, voice, "NG")
+    say(client, voice, "DOCH")
+    assert cart(say(client, voice, "दो")) == [("MED-00025", 2, "STRIP")]
+
+
+# ---- two names heard -------------------------------------------------------
+
+def test_two_names_then_unclear_twice_starts_afresh(client, demo_catalogue):
+    voice = session(client)
+    first = say(client, voice, "CREMAFFIN, DOLO 650")
+    assert first["assistant_text"].startswith("कौन सी दवा चाहिए: CREMAFFIN या DOLO 650?")
+    assert say(client, voice, "NG")["assistant_text"].startswith("कौन सी दवा चाहिए: CREMAFFIN या DOLO 650?")
+    third = say(client, voice, "BASTA THANK YOU GERAMIN")
+    assert "CREMAFFIN या DOLO 650" not in third["assistant_text"]
+
+
+def test_two_names_then_a_strength_starts_afresh(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "CREMAFFIN, DOLO 650")
+    assert say(client, voice, "600.")["assistant_text"] == "BRUFEN 600MG की कितनी स्ट्रिप चाहिए?"
+
+
+# ---- complete orders -------------------------------------------------------
+
+def test_complete_hindi_order_with_two_medicines(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "dolo")
+    say(client, voice, "2")
+    say(client, voice, "ब्रूफेन")
+    say(client, voice, "चार सौ")
+    say(client, voice, "एक")
+    summary = say(client, voice, "order confirm")
+    assert "DOLO 650MG" in summary["assistant_text"] and "BRUFEN 400MG" in summary["assistant_text"]
+    confirmed = say(client, voice, "हाँ")
+    assert confirmed["order"] is not None
+    assert sorted(i["medicine_id"] for i in confirmed["order"]["line_items"]) == ["MED-00014", "MED-00025"]
+
+
+def test_complete_english_order(client, demo_catalogue):
+    voice = session(client, "en")
+    asked = say(client, voice, "add brufen")
+    assert asked["assistant_text"] == "Do you want BRUFEN 200MG, 400MG or 600MG?"
+    picked = say(client, voice, "second")
+    assert picked["assistant_text"] == "How many strips of BRUFEN 400MG? Please say the quantity."
+    added = say(client, voice, "two")
+    assert cart(added) == [("MED-00014", 2, "STRIP")]
+    assert "Anything else" in added["assistant_text"]
+    say(client, voice, "confirm")
+    assert say(client, voice, "yes")["order"] is not None
+
+
+# ---- live call 2026-11-20 19:42 IST, replayed ------------------------------
+
+LIVE_CALL_19_42 = [
+    "600.", "DOLO 650 BRUFIN CEROM 480", "brufan 400 mg chahiye umli", "5.5.", "5% 5%", "500.",
+    "paracet ecorretion paracet cermin", "ARACHITOL M", "5 STRIP END KALDI", "650.",
+    "NO! PARA 60 CETIRIZINE", "650.", "paracet", "PLEMENT CEROM IN",
+    "CREMAFFIN CREMAFFIN CREMAFFIN CREMAFFIN DOLO 650", "550.", "Cromoson HEAP POTUSHRIP",
+    "BASTA THANK YOU GERAMIN", "600.",
+]
+
+
+def test_strength_of_another_medicine_during_variant_choice_switches(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "arachitol")
+    kept = say(client, voice, "5 STRIP END KALDI")
+    assert kept["assistant_text"].startswith("ARACHITOL INJ चाहिए या NANO SUGAR FREE?")
+    switched = say(client, voice, "650.")
+    assert switched["assistant_text"] == "DOLO 650MG की कितनी स्ट्रिप चाहिए?"
+
+
+def test_other_strength_with_count_during_quantity_switches_and_adds(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "brufen 200")
+    assert cart(say(client, voice, "char sau ke do patte")) == [("MED-00014", 2, "STRIP")]
+
+
+def test_count_said_during_variant_choice_is_kept(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "ब्रूफेन")
+    say(client, voice, "5 strip")
+    assert cart(say(client, voice, "400")) == [("MED-00014", 5, "STRIP")]
+
+
+def test_cerom_in_english_letters(client, demo_catalogue):
+    assert say(client, session(client), "cerom")["assistant_text"] == "CEROM 500 की कितनी स्ट्रिप चाहिए?"
+
+
+def test_live_call_never_repeats_one_question_three_times(client, demo_catalogue):
+    voice = session(client)
+    replies = [say(client, voice, text)["assistant_text"] for text in LIVE_CALL_19_42]
+    run = longest = 1
+    for previous, current in zip(replies, replies[1:]):
+        run = run + 1 if current.split("?")[0] == previous.split("?")[0] else 1
+        longest = max(longest, run)
+    assert longest <= 2, replies

@@ -6,6 +6,11 @@ def voice(client):
     return client.post('/voice/sessions',json={'language':'hi'}).json()
 
 
+def asks_how_many(text):
+    # "BRUFEN 200MG की कितनी स्ट्रिप चाहिए?" (or the older "मात्रा ... बताएं").
+    return 'कितनी' in text or 'मात्रा' in text
+
+
 def turn(client,session,text):
     result=client.post(f"/voice/sessions/{session['voice_session_id']}/turns",json={'text':text,'speak':False})
     assert result.status_code==200,result.text
@@ -293,7 +298,7 @@ def test_looping_segment_is_dropped(monkeypatch):
 def test_live_call_quantity_answers_add_two_strips(client,seed_catalogue,answer):
     session=voice(client)
     first=turn(client,session,'BRUFEN 200 MG 15S')
-    assert first['order_summary'] is None and 'मात्रा' in first['assistant_text']
+    assert first['order_summary'] is None and asks_how_many(first['assistant_text'])
     result=turn(client,session,answer)
     assert result['order_summary'] is not None, result['assistant_text']
     item=result['order_summary']['items'][0]
@@ -305,7 +310,7 @@ def test_unclear_quantity_answer_still_asks_again(client,seed_catalogue):
     session=voice(client)
     turn(client,session,'BRUFEN 200 MG 15S')
     result=turn(client,session,'NARISLIP')
-    assert result['order_summary'] is None and 'मात्रा' in result['assistant_text']
+    assert result['order_summary'] is None and asks_how_many(result['assistant_text'])
 
 
 def test_number_only_uses_bottles_for_syrup_and_asks_unit_for_others(client,seed_catalogue,db_session):
@@ -344,10 +349,11 @@ def test_live_call_exact_name_and_strength_with_one_stray_word(client,seed_catal
     assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00013',2,'STRIP')
 
 
-def test_garbled_name_with_strength_digits_still_needs_a_choice(client,seed_catalogue):
-    # Two unknown words: too much is unclear to pick for the caller.
+def test_exact_name_and_strength_among_noise_picks_that_variant(client,seed_catalogue):
+    # The exact name and a strength fitting one variant; the reply names it.
     result=turn(client,voice(client),'brufan 200MG nara bara')
-    assert result['order_summary'] is None and len(result['candidates'])==3
+    assert result['order_summary'] is None and 'BRUFEN 200MG' in result['assistant_text']
+    assert asks_how_many(result['assistant_text'])
 
 
 @pytest.mark.parametrize('answer,quantity', [('DO SHRIP',2),('egg strip',1),('the two strip',2)])
@@ -424,9 +430,10 @@ def test_tab_in_medicine_name_is_not_the_unit(client,seed_catalogue):
 def test_exact_name_among_noise_lets_caller_pick_variant(client,syrups_and_injection,choice,medicine):
     session=voice(client)
     first=turn(client,session,'LOSCHIT, LOSCHIT, CREMAFFIN')
-    assert len(first['candidates'])==3 and 'पहला' in first['assistant_text']
+    assert len(first['candidates'])==3
+    assert first['assistant_text']=='CREMAFFIN MINT PLAIN चाहिए, MIXED FRUIT या PLUS?'
     picked=turn(client,session,choice)
-    assert picked['order_summary'] is None and 'मात्रा' in picked['assistant_text']
+    assert picked['order_summary'] is None and asks_how_many(picked['assistant_text'])
     result=turn(client,session,'2')
     item=result['order_summary']['items'][0]
     assert (item['medicine_id'],item['quantity'],item['unit'])==(medicine,2,'BOTTLE')
@@ -466,7 +473,7 @@ def test_single_variant_name_among_noise_asks_quantity(client,seed_catalogue):
     session=voice(client)
     first=turn(client,session,'COG, CLOMIN, F')
     assert first['candidates']==[] or first['candidates'] is None or len(first['candidates'])==0
-    assert 'CLOMIN TAB' in first['assistant_text'] and 'मात्रा' in first['assistant_text']
+    assert 'CLOMIN TAB' in first['assistant_text'] and asks_how_many(first['assistant_text'])
     result=turn(client,session,'2 STF CHINEE')
     item=result['order_summary']['items'][0]
     assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00003',2,'STRIP')
@@ -475,7 +482,7 @@ def test_single_variant_name_among_noise_asks_quantity(client,seed_catalogue):
 def test_live_call_09_28_clomin_and_four_strips(client,seed_catalogue):
     session=voice(client)
     first=turn(client,session,'MOUJEEK, CLOMIN TAB')
-    assert 'मात्रा' in first['assistant_text']
+    assert asks_how_many(first['assistant_text'])
     result=turn(client,session,'CHARIS TIP')
     item=result['order_summary']['items'][0]
     assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00003',4,'STRIP')
@@ -495,7 +502,7 @@ def test_repeating_a_name_with_a_number_is_not_the_quantity(client,dolo_650,repe
     turn(client,session,'DOLO 650')
     result=turn(client,session,repeat)
     assert result['order_summary'] is None
-    assert '1 से 100' not in result['assistant_text'] and 'मात्रा' in result['assistant_text']
+    assert '1 से 100' not in result['assistant_text'] and asks_how_many(result['assistant_text'])
 
 
 @pytest.mark.parametrize('answer,quantity', [('DOLO 650 2',2),('dolo 650 ke do patte',2),('डोलो के तीन पत्ते',3),('2',2)])
@@ -522,7 +529,7 @@ def test_two_names_heard_asks_which_medicine_by_name(client,dolo_650):
     assert 'कौन सी दवा चाहिए: BRUFEN या DOLO 650' in first['assistant_text']
     assert 'पूरा नाम' not in first['assistant_text']
     asked=turn(client,session,'dolo')
-    assert asked['order_summary'] is None and 'मात्रा' in asked['assistant_text']
+    assert asked['order_summary'] is None and asks_how_many(asked['assistant_text'])
     result=turn(client,session,'2')
     item=result['order_summary']['items'][0]
     assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00025',2,'STRIP')
@@ -540,9 +547,10 @@ def test_two_names_heard_then_multi_variant_name_asks_strength(client,dolo_650):
     session=voice(client)
     turn(client,session,'brufin, dolo650')
     narrowed=turn(client,session,'brufen')
-    assert len(narrowed['candidates'])==3 and 'पहला' in narrowed['assistant_text']
+    assert len(narrowed['candidates'])==3
+    assert narrowed['assistant_text']=='BRUFEN 200MG चाहिए, 400MG या 600MG?'
     picked=turn(client,session,'400')
-    assert 'मात्रा' in picked['assistant_text']
+    assert asks_how_many(picked['assistant_text'])
     result=turn(client,session,'2')
     assert result['order_summary']['items'][0]['medicine_id']=='MED-00014'
 

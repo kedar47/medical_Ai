@@ -1117,3 +1117,82 @@ def build_intent_parser(settings: Settings) -> DeterministicIntentParser:
         deterministic,
         OllamaIntentParser(settings),
     )
+
+
+# Spoken hundreds for strengths: "दो सौ", "char sau", Whisper's "car so",
+# "six fifty" (650), "तीन सौ पच्चीस" (325). Used where a strength is expected,
+# e.g. the answer to "BRUFEN 200MG चाहिए, 400MG या 600MG?".
+_HUNDREDS_DIGITS = {
+    "एक": 1, "दो": 2, "तीन": 3, "चार": 4, "पांच": 5, "पाँच": 5, "छह": 6, "छः": 6,
+    "सात": 7, "आठ": 8, "नौ": 9,
+    "ek": 1, "do": 2, "teen": 3, "char": 4, "chaar": 4, "car": 4, "paanch": 5,
+    "panch": 5, "chhe": 6, "chhah": 6, "che": 6, "saat": 7, "aath": 8, "nau": 9,
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9,
+}
+_HUNDRED_WORDS = {"सौ", "sau", "so", "sow", "saw", "hundred", "हंड्रेड", "हन्ड्रेड"}
+_TENS_WORDS = {
+    "पचास": 50, "pachas": 50, "pachaas": 50, "fifty": 50,
+    "पच्चीस": 25, "pachchis": 25, "pachis": 25,
+    "बीस": 20, "bees": 20, "twenty": 20,
+}
+
+
+def split_spoken_hundreds(text: str) -> tuple[set[str], str]:
+    """Strength values said in words, and the text without those words."""
+    tokens = normalize_text(text).split()
+    values: set[str] = set()
+    keep: list[str] = []
+    index = 0
+    while index < len(tokens):
+        digit = _HUNDREDS_DIGITS.get(tokens[index])
+        if digit is not None and index + 1 < len(tokens):
+            nxt = tokens[index + 1]
+            if nxt in _HUNDRED_WORDS:
+                value, used = digit * 100, 2
+                if index + 2 < len(tokens) and tokens[index + 2] in _TENS_WORDS:
+                    value += _TENS_WORDS[tokens[index + 2]]
+                    used = 3
+                values.add(str(value))
+                index += used
+                continue
+            if nxt in _TENS_WORDS:  # "six fifty", "three twenty five" style
+                tens = _TENS_WORDS[nxt]
+                used = 2
+                if nxt in {"twenty", "बीस", "bees"} and index + 2 < len(tokens) and tokens[index + 2] in {"five", "पांच", "पाँच", "paanch"}:
+                    tens, used = 25, 3
+                values.add(str(digit * 100 + tens))
+                index += used
+                continue
+        keep.append(tokens[index])
+        index += 1
+    return values, " ".join(keep)
+
+
+def spoken_hundreds(text: str) -> set[str]:
+    return split_spoken_hundreds(text)[0]
+
+
+# "नहीं" while the agent is choosing a variant or asking a quantity means
+# "not this one", not a correction of the order.
+NEGATIVE_WORDS = {
+    "नहीं", "नही", "nahi", "nahin", "nai", "nhi", "no", "nope", "नो", "galat",
+    "गलत", "wrong", "mat", "मत", "ना",
+}
+_NEGATIVE_FILLERS = {
+    "ji", "जी", "bhai", "भाई", "sir", "सर", "yeh", "ye", "यह", "ये", "wo", "woh",
+    "वो", "वह", "please", "chahiye", "चाहिए", "चाहिये", "nahi", "ye", "दवा", "dawa",
+}
+
+
+def is_plain_negative(text: str) -> bool:
+    tokens = [fold_latin(token) for token in normalize_text(text).split()]
+    if not tokens or not any(token in NEGATIVE_WORDS for token in tokens):
+        return False
+    return all(token in NEGATIVE_WORDS or token in _NEGATIVE_FILLERS for token in tokens)
+
+
+STRENGTH_ONLY_WORDS = {
+    "wala", "wali", "wale", "वाला", "वाली", "वाले", "chahiye", "चाहिए", "चाहिये",
+    "mg", "एमजी", "ml", "please", "ji", "जी", "milligram", "milligrams",
+} | set(_HUNDREDS_DIGITS) | _HUNDRED_WORDS | set(_TENS_WORDS)

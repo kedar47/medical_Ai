@@ -21,6 +21,9 @@ class VoicePendingState(BaseModel):
     unit: OrderUnit | None = None
     candidates: list[MedicineMatchCandidate] = Field(default_factory=list)
     requested_text: str | None = None
+    # Unclear answers to this question so far; after three the agent stops
+    # asking it and asks for the medicine name again (no endless loop).
+    retries: int = Field(default=0, ge=0)
     # NAME_HEARD: an exact catalogue name was heard and only its variant is
     # open, so the caller may pick it by number, strength or flavour.
     match_status: Literal["CLARIFICATION_REQUIRED", "NOT_FOUND", "NAME_HEARD", "NAMES_HEARD"] | None = None

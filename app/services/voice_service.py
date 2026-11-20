@@ -43,6 +43,7 @@ from app.schemas.voice import (
 from app.services.matching_service import MedicineMatchingService, normalize_text
 from app.services.medicine_attributes import (
     MedicineAttributes,
+    attributes_from_candidate,
     attributes_from_text,
     not_found_text,
     pack_size_tokens,
@@ -54,9 +55,14 @@ from app.services.order_service import OrderService
 from app.services.voice import build_intent_parser, build_stt, build_tts
 from app.services.voice.intent import (
     DO_AS_ENGLISH_WORDS,
+    STRENGTH_ONLY_WORDS,
     DeterministicIntentParser,
     first_quantity_word,
     fold_latin,
+    is_plain_negative,
+    normalize_spoken_strengths,
+    split_spoken_hundreds,
+    spoken_hundreds,
     contains_medicine_id,
     description_strength_tokens,
     detect_language,
@@ -138,6 +144,10 @@ def initial_greeting_text(language: str) -> str:
     )
 
 
+_PLURAL_EN = {"STRIP": "strips", "BOTTLE": "bottles", "BOX": "boxes",
+              "TABLET": "tablets", "UNIT": "units"}
+
+
 def _unit_label(unit: OrderUnit | str, language: str) -> str:
     value = OrderUnit(unit)
     if language == "hi":
@@ -173,7 +183,7 @@ class VoiceService:
         text: str,
         candidates: list[MedicineMatchCandidate],
     ) -> set[str]:
-        strengths = extract_strength_tokens(text)
+        strengths = extract_strength_tokens(text) | spoken_hundreds(text)
         if candidates:
             shared = set.intersection(
                 *(pack_size_tokens(candidate.description or "") for candidate in candidates)
@@ -518,6 +528,20 @@ class VoiceService:
         if parsed is None:
             parsed = self._parse_intent(text, language, state.pending)
 
+        if state.pending is not None and is_plain_negative(text):
+            # "नहीं" to "BRUFEN 200MG चाहिए या 400MG?" or to a quantity
+            # question drops that item only; the order stays as it is.
+            state.pending = None
+            return TurnDraft(
+                intent=VoiceIntent.ADD_ITEM,
+                language=language,
+                assistant_text=_text(
+                    "ठीक है, वह दवा नहीं जोड़ी। कौन सी दवा चाहिए?",
+                    "Okay, I did not add it. Which medicine do you want?",
+                    language,
+                ),
+            )
+
         # Correction markers take precedence over optional LLM/add classification,
         # but never over an explicit control phrase. Hindi/English confirmation
         # phrases such as "confirm kar do" contain correction words ("kar do").
@@ -576,13 +600,16 @@ class VoiceService:
                 voice, state, text, language
             )
 
+        strength_value = self._strength_only_value(text)
+        if strength_value is not None:
+            return self._offer_by_strength(voice, state, strength_value, language)
         if parsed.intent == VoiceIntent.SELECT_CANDIDATE:
             return TurnDraft(
                 intent=VoiceIntent.SELECT_CANDIDATE,
                 language=language,
                 assistant_text=_text(
-                    "अभी कोई दवा विकल्प चुनने के लिए नहीं है। कृपया दवा का नाम, मात्रा और इकाई बताएं।",
-                    "There is no medicine choice waiting. Please say the medicine name, quantity, and unit.",
+                    "कौन सी दवा चाहिए? कृपया दवा का नाम बताएं, जैसे ब्रूफेन 400।",
+                    "Which medicine do you want? Please say its name, for example BRUFEN 400.",
                     language,
                 ),
             )
@@ -748,6 +775,14 @@ class VoiceService:
                     {normalize_text(c.medicine_name) for c in result.candidates}
                 ) == 1
             )
+            if name_heard and spoken.strengths and len(strict_candidates) == 1:
+                # "brufin car so chahiye" (चार सौ): the name and a strength that
+                # fits exactly one variant.
+                selected = strict_candidates[0]
+                self._log_matching("add_fuzzy", text, result.candidates, selected, "STRICT_MATCH")
+                return self._add_candidate(
+                    voice, state, selected, quantity, unit, language
+                )
             if name_heard and len(result.candidates) == 1:
                 selected = strict_candidates[0]
                 self._log_matching("add_fuzzy", text, result.candidates, selected, "STRICT_MATCH")
@@ -866,10 +901,12 @@ class VoiceService:
             assistant_text=_text(
                 f"ठीक है, {label} की "
                 f"{quantity} {_unit_label(unit, language)} जोड़ दी। "
-                f"ऑर्डर में अभी {summary.line_item_count} आइटम हैं।",
+                f"ऑर्डर में अभी {summary.line_item_count} आइटम हैं। "
+                "और कोई दवा चाहिए, या ऑर्डर कन्फर्म करूँ?",
                 f"Added {quantity} {_unit_label(unit, language)} of "
                 f"{label}. "
-                f"The draft now has {summary.line_item_count} line item(s).",
+                f"The draft now has {summary.line_item_count} line item(s). "
+                "Anything else, or shall I confirm the order?",
                 language,
             ),
             order_summary=summary,
@@ -916,6 +953,16 @@ class VoiceService:
         if pending.match_status == "NAMES_HEARD":
             return self._narrow_to_named_medicine(voice, state, pending, text, language)
 
+        # Live call: "650." while ARACHITOL's variant was being chosen. A
+        # strength that only other medicines have means the caller moved on.
+        strength_value = self._strength_only_value(text)
+        if strength_value is not None:
+            pending_ids = {c.medicine_id for c in pending.candidates}
+            matches = self._strength_candidates(strength_value)
+            if matches and not ({c.medicine_id for c in matches} & pending_ids):
+                state.pending = None
+                return self._offer_by_strength(voice, state, strength_value, language)
+
         spoken = self._selection_attributes(text, pending.candidates)
         selected = self._select_candidate(pending, text)
         if selected is None:
@@ -923,7 +970,10 @@ class VoiceService:
                 self._mentions_candidate_name(text, candidate)
                 for candidate in pending.candidates
             )
-            if explicit_name or (
+            has_attributes = bool(
+                spoken.strengths or spoken.strength_units or spoken.formulations
+            )
+            if (explicit_name and has_attributes) or (
                 spoken.strengths and len(pending.candidates) == 1
             ):
                 self._log_matching(
@@ -931,6 +981,18 @@ class VoiceService:
                     "ATTRIBUTE_CONFLICT",
                 )
                 return self._not_found_draft(state, language)
+            # Only the name again ("brufen") or an unclear answer: ask
+            # again, and after three tries ask for the medicine afresh. A
+            # count said meanwhile ("5 STRIP ...") is kept for the choice.
+            heard_quantity, heard_unit, _ = extract_quantity_unit(text)
+            updates = {}
+            if heard_quantity is not None:
+                updates["quantity"] = heard_quantity
+            if heard_unit is not None:
+                updates["unit"] = heard_unit
+            gave_up = self._count_retry(state, pending, language, updates)
+            if gave_up is not None:
+                return gave_up
             self._log_matching(
                 "candidate_pending", text, pending.candidates, None,
                 "CLARIFICATION_REQUIRED",
@@ -961,7 +1023,26 @@ class VoiceService:
         variants are picked by strength or offered as पहला/दूसरा."""
         chosen = [c for c in pending.candidates if self._mentions_candidate_name(text, c)]
         names = list(dict.fromkeys(c.medicine_name for c in chosen))
-        if len(names) != 1:
+        if not names:
+            # Live call: the question was built from Whisper's hint echo
+            # ("CREMAFFIN ... DOLO 650") and the caller named neither, five
+            # times. Ask once more for an unclear answer; a clear new request
+            # (a strength such as "650.") or a second miss starts afresh.
+            if pending.retries == 0 and self._strength_only_value(text) is None:
+                state.pending = pending.model_copy(update={"retries": 1})
+                all_names = list(dict.fromkeys(c.medicine_name for c in pending.candidates))
+                return TurnDraft(
+                    intent=VoiceIntent.SELECT_CANDIDATE,
+                    language=language,
+                    candidates=pending.candidates,
+                    assistant_text=self._which_medicine_prompt(all_names, language),
+                )
+            state.pending = None
+            return self._handle_text(voice, state, text, language)
+        if len(names) > 1:
+            gave_up = self._count_retry(state, pending, language)
+            if gave_up is not None:
+                return gave_up
             all_names = list(dict.fromkeys(c.medicine_name for c in pending.candidates))
             return TurnDraft(
                 intent=VoiceIntent.SELECT_CANDIDATE,
@@ -989,6 +1070,161 @@ class VoiceService:
             language=language,
             candidates=chosen,
             assistant_text=self._candidate_prompt(chosen, language, fuzzy=False),
+        )
+
+    def _count_retry(self, state, pending, language, updates=None):
+        retries = pending.retries + 1
+        if retries >= 3:
+            state.pending = None
+            return TurnDraft(
+                intent=VoiceIntent.SELECT_CANDIDATE,
+                language=language,
+                assistant_text=_text(
+                    "माफ़ कीजिए, मैं समझ नहीं पाया। कौन सी दवा चाहिए? दवा का नाम दोबारा बताएं।",
+                    "Sorry, I did not catch that. Which medicine do you want? Please say its name again.",
+                    language,
+                ),
+            )
+        state.pending = pending.model_copy(update={"retries": retries, **(updates or {})})
+        return None
+
+    def _variant_question(self, candidates, language: str) -> str:
+        """"BRUFEN 200MG चाहिए, 400MG या 600MG?" - the part that differs
+        between variants, in catalogue order (so पहला/दूसरा still work)."""
+        labels = [spoken_name(c, alternatives=candidates) for c in candidates]
+        parts = [label.split() for label in labels]
+        prefix: list[str] = []
+        for column in zip(*parts):
+            if all(word == column[0] for word in column):
+                prefix.append(column[0])
+            else:
+                break
+        rest = [p[len(prefix):] for p in parts]
+        suffix: list[str] = []
+        for column in zip(*(r[::-1] for r in rest)):
+            if all(word == column[0] for word in column) and all(len(r) > len(suffix) + 1 for r in rest):
+                suffix.insert(0, column[0])
+            else:
+                break
+        options = [" ".join(r[: len(r) - len(suffix)]) for r in rest]
+        if 2 <= len(options) <= 4 and prefix and all(options) and len(set(options)) == len(options):
+            base = " ".join(prefix)
+            middle_hi = "".join(f", {o}" for o in options[1:-1])
+            middle_en = "".join(f", {o}" for o in options[1:-1])
+            return _text(
+                f"{base} {options[0]} चाहिए{middle_hi} या {options[-1]}?",
+                f"Do you want {base} {options[0]}{middle_en} or {options[-1]}?",
+                language,
+            )
+        if 2 <= len(labels) <= 4:
+            return _text(
+                ", ".join(labels[:-1]) + f" या {labels[-1]} में से कौन सी दवा चाहिए?",
+                "Which one do you want: " + ", ".join(labels[:-1]) + f" or {labels[-1]}?",
+                language,
+            )
+        return _text(
+            "पहला, दूसरा, या strength बताएं: ",
+            "Please say first, second, or strength: ",
+            language,
+        ) + self._format_candidates(candidates)
+
+    _FORM_FAMILIES = {
+        "tablet": {"tab", "tabs", "tablet", "tablets", "goli", "goliyan", "गोली",
+                   "गोलियां", "गोलियाँ", "टैबलेट", "टेबलेट", "cap", "caps",
+                   "capsule", "capsules", "कैप्सूल"},
+        "liquid": {"syrup", "syp", "susp", "suspension", "सिरप", "सस्पेंशन",
+                   "liquid", "sirap", "sirup"},
+        "injection": {"inj", "injection", "injections", "इंजेक्शन", "injekshan"},
+    }
+
+    def _families(self, text: str) -> set[str]:
+        tokens = {fold_latin(t) for t in normalize_text(text).split()}
+        return {family for family, words in self._FORM_FAMILIES.items() if tokens & words}
+
+    def _select_candidate_by_form(self, candidates, text):
+        """"गोली वाली" / "syrup" / "injection" between a tablet and a liquid."""
+        spoken = self._families(text)
+        if len(spoken) != 1 or len(candidates) < 2:
+            return None
+        matches = [
+            c for c in candidates
+            if spoken & self._families(f"{c.medicine_name} {c.description or ''}")
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _strength_only_value(self, text: str) -> str | None:
+        """"650." / "600 mg" / "छह सौ": Whisper kept only the strength of
+        "DOLO 650". A small number alone is a count, not a strength."""
+        values = extract_strength_tokens(text) | spoken_hundreds(text)
+        if len(values) != 1:
+            return None
+        value = next(iter(values))
+        normalized = normalize_spoken_strengths(text)
+        for token in normalize_text(normalized).split():
+            if token.isdigit() or re.fullmatch(r"\d+(?:mg|mcg|ml|gm|g|iu)", token):
+                continue
+            if fold_latin(token) not in STRENGTH_ONLY_WORDS:
+                return None
+        has_unit = bool(re.search(r"\d\s*(?:mg|mcg|ml|gm|g|iu)(?!\w)", normalized, re.IGNORECASE))
+        if not value.isdigit():
+            return None
+        if int(value) <= self.settings.max_order_item_quantity and not has_unit:
+            return None
+        return value
+
+    def _strength_candidates(self, value: str) -> list[MedicineMatchCandidate]:
+        candidates = []
+        for medicine in self.matching.repository.list_all_active():
+            candidate = MedicineMatchCandidate(
+                medicine_id=medicine.medicine_id,
+                medicine_name=medicine.medicine_name,
+                description=medicine.description,
+                match_type="EXACT_NAME",
+            )
+            if value in attributes_from_candidate(candidate).strengths:
+                candidates.append(candidate)
+        return sorted(candidates, key=lambda c: c.medicine_id)
+
+    def _offer_by_strength(
+        self, voice, state, value: str, language: str, quantity=None, unit=None
+    ) -> TurnDraft:
+        """Only the strength was heard: offer the catalogue medicine(s) that
+        have it. One match asks its quantity (the caller hears the name and
+        can say नहीं); several ask which; none asks for the name."""
+        candidates = self._strength_candidates(value)
+        self._log_matching("strength_only", value, candidates, None, "STRENGTH_ONLY")
+        if not candidates:
+            return TurnDraft(
+                intent=VoiceIntent.ADD_ITEM,
+                language=language,
+                assistant_text=_text(
+                    "कौन सी दवा चाहिए? कृपया दवा का नाम भी बताएं।",
+                    "Which medicine do you want? Please say its name too.",
+                    language,
+                ),
+            )
+        if len(candidates) == 1:
+            return self._add_candidate(voice, state, candidates[0], quantity, unit, language)
+        names = list(dict.fromkeys(normalize_text(c.medicine_name) for c in candidates))
+        status = "CLARIFICATION_REQUIRED" if len(names) == 1 else "NAMES_HEARD"
+        state.pending = VoicePendingState(
+            kind="candidate",
+            candidates=candidates,
+            quantity=quantity,
+            unit=unit,
+            requested_text=value,
+            match_status=status,
+        )
+        if status == "CLARIFICATION_REQUIRED":
+            prompt = self._candidate_prompt(candidates, language, fuzzy=False)
+        else:
+            labels = [spoken_name(c, alternatives=candidates) for c in candidates]
+            prompt = self._which_medicine_prompt(labels, language)
+        return TurnDraft(
+            intent=VoiceIntent.ADD_ITEM,
+            language=language,
+            candidates=candidates,
+            assistant_text=prompt,
         )
 
     def _which_medicine_prompt(self, names: list[str], language: str) -> str:
@@ -1078,7 +1314,28 @@ class VoiceService:
             quantity = 2
         if quantity is None:
             # "DO SHRIP", "the two strip": the count is there, the unit garbled.
-            quantity = first_quantity_word(count_text)
+            quantity = first_quantity_word(split_spoken_hundreds(count_text)[1])
+        # "650." or "छह सौ पचास" while DOLO 650's count is asked: Whisper kept
+        # only the strength. Another medicine's strength means the caller
+        # moved on; this medicine's own strength is not a count.
+        said_strengths = spoken_hundreds(count_text)
+        if quantity is not None and quantity > self.settings.max_order_item_quantity:
+            said_strengths = said_strengths | {str(quantity)}
+        own_strengths = attributes_from_candidate(pending_candidate).strengths
+        if said_strengths:
+            if said_strengths <= own_strengths:
+                if quantity is not None and str(quantity) in said_strengths:
+                    quantity = None
+            elif len(said_strengths) == 1:
+                value = next(iter(said_strengths))
+                if any(c.medicine_id != pending.medicine_id for c in self._strength_candidates(value)):
+                    # "char sau ke do patte" for a pending BRUFEN 200: BRUFEN 400,
+                    # and the two strips are kept.
+                    count = None if quantity is None or str(quantity) in said_strengths else quantity
+                    state.pending = None
+                    return self._offer_by_strength(
+                        voice, state, value, language, count, unit if count else None
+                    )
         strength_text = remaining
         if quantity is not None:
             strength_text = re.sub(rf"(?<!\d){quantity}(?!\d)", " ", remaining, count=1)
@@ -1106,6 +1363,30 @@ class VoiceService:
 
         quantity = quantity or pending.quantity
         unit = unit or pending.unit
+        if quantity is None:
+            # Live calls: Whisper mangled the count ("NG", "DOCH", "PIPE
+            # POTCH") and the same question was asked up to 7 times. Each miss
+            # now gets a clearer question; after four the agent starts over.
+            retries = pending.retries + 1
+            if retries >= 4:
+                state.pending = None
+                return TurnDraft(
+                    intent=VoiceIntent.ADD_ITEM,
+                    language=language,
+                    assistant_text=_text(
+                        "माफ़ कीजिए, मैं समझ नहीं पाया। कौन सी दवा चाहिए? दवा का नाम दोबारा बताएं।",
+                        "Sorry, I did not catch that. Which medicine do you want? Please say its name again.",
+                        language,
+                    ),
+                )
+            state.pending = pending.model_copy(update={"retries": retries, "unit": unit})
+            return TurnDraft(
+                intent=VoiceIntent.ADD_ITEM,
+                language=language,
+                assistant_text=self._quantity_retry_prompt(
+                    pending_candidate, unit, retries, language
+                ),
+            )
         self._log_matching(
             "quantity_pending", text, [pending_candidate], pending_candidate,
             "STRICT_MATCH",
@@ -1539,6 +1820,9 @@ class VoiceService:
         word_selected = self._select_candidate_from_words(pending.candidates, text)
         if word_selected is not None and strictly_matches(word_selected, spoken):
             return word_selected
+        form_selected = self._select_candidate_by_form(pending.candidates, text)
+        if form_selected is not None:
+            return form_selected
         if len(explicit_name) == 1:
             return explicit_name[0]
         ordinal = extract_ordinal(text)
@@ -1722,11 +2006,7 @@ class VoiceService:
                 "Which medicine do you want? Say its name and strength, or the medicine ID: ",
                 language,
             ) + options
-        return _text(
-            "पहला, दूसरा, या strength बताएं: ",
-            "Please say first, second, or strength: ",
-            language,
-        ) + options
+        return self._variant_question(candidates, language)
 
     def _candidate_retry_prompt(
         self,
@@ -1743,11 +2023,11 @@ class VoiceService:
                 "Which medicine do you want? Say its name and strength, or the medicine ID: ",
                 language,
             ) + self._format_candidates(pending.candidates)
-        return _text(
-            "पहला, दूसरा, या strength बताएं: ",
-            "Please say first, second, or strength: ",
+        return self._variant_question(pending.candidates, language) + _text(
+            " आप पहला या दूसरा भी बोल सकते हैं।",
+            " You can also say first or second.",
             language,
-        ) + self._format_candidates(pending.candidates)
+        )
 
     def _format_candidates(
         self, candidates: list[MedicineMatchCandidate]
@@ -1755,6 +2035,29 @@ class VoiceService:
         return " ".join(
             f"{index}) {spoken_name(candidate, alternatives=candidates)}"
             for index, candidate in enumerate(candidates, start=1)
+        )
+
+    def _quantity_retry_prompt(self, candidate, unit, retries: int, language: str) -> str:
+        label = spoken_name(candidate)
+        unit = unit or default_unit_for(candidate.description)
+        if unit is None:
+            return _text(
+                f"माफ़ कीजिए, साफ़ सुनाई नहीं दिया। {label} की मात्रा और इकाई बताएं, जैसे दो डिब्बे।",
+                f"Sorry, I did not catch that. For {label}, please say the quantity and unit, for example two boxes.",
+                language,
+            )
+        unit_hi = _unit_label(unit, "hi")
+        unit_en = _PLURAL_EN[OrderUnit(unit).value]
+        if retries == 1:
+            return _text(
+                f"माफ़ कीजिए, साफ़ सुनाई नहीं दिया। {label} की कितनी {unit_hi} चाहिए? बस संख्या बोलें, जैसे दो।",
+                f"Sorry, I did not catch that. How many {unit_en} of {label}? Just say a number, like two. Please say the quantity.",
+                language,
+            )
+        return _text(
+            f"{label} के लिए बस संख्या बोलें, जैसे एक, दो या तीन। यह दवा नहीं चाहिए तो नहीं बोलें।",
+            f"For {label}, just say a number such as one, two or three, or say no if you do not want it. Please say the quantity.",
+            language,
         )
 
     def _repeat_quantity_text(self, language: str) -> str:
@@ -1773,9 +2076,17 @@ class VoiceService:
     ) -> str:
         label = spoken_name(candidate)
         if quantity is None and unit is None:
+            natural = default_unit_for(candidate.description)
+            if natural is not None:
+                # "कितनी स्ट्रिप चाहिए?": a number alone is a full answer.
+                return _text(
+                    f"{label} की कितनी {_unit_label(natural, 'hi')} चाहिए?",
+                    f"How many {_PLURAL_EN[OrderUnit(natural).value]} of {label}? Please say the quantity.",
+                    language,
+                )
             return _text(
-                f"{label} के लिए मात्रा और इकाई बताएं, जैसे दो स्ट्रिप।",
-                f"For {label}, please say the quantity and unit, for example two strips.",
+                f"{label} के लिए मात्रा और इकाई बताएं, जैसे दो डिब्बे।",
+                f"For {label}, please say the quantity and unit, for example two boxes.",
                 language,
             )
         if unit is None:
@@ -1785,8 +2096,8 @@ class VoiceService:
                 language,
             )
         return _text(
-            f"{label} की इकाई {_unit_label(unit, language)} है। कृपया मात्रा बताएं।",
-            f"The unit for {label} is {_unit_label(unit, language)}. Please say the quantity.",
+            f"{label} की कितनी {_unit_label(unit, 'hi')} चाहिए?",
+            f"How many {_PLURAL_EN[OrderUnit(unit).value]} of {label}? Please say the quantity.",
             language,
         )
 

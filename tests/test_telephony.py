@@ -951,7 +951,7 @@ def test_reply_starts_playing_before_the_whole_reply_is_synthesized(
     # Live calls waited 4-8 s of synthesis before any reply audio. Now the
     # first sentence plays while the rest is still being synthesized.
     client, stt = simulated_gateway
-    stt.text = "add two strips of brufen"
+    stt.text = "add two strips of clomin"  # three-sentence reply
     spoken = []
     original = TTS.synthesize
 

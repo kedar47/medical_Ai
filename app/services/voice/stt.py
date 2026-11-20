@@ -103,7 +103,13 @@ class FasterWhisperSTT:
             name for name in found
             if not any(name != other and name in other for other in found)
         }
-        return max(hits, len(distinct)) >= 3
+        # Live call: "CREMAFFIN CREMAFFIN CREMAFFIN CREMAFFIN DOLO 650". A
+        # caller does not say one name three times; Whisper's loop does.
+        repeated = max(
+            (len(re.findall(r"(?<!\w)" + re.escape(name) + r"(?!\w)", lowered)) for name in names),
+            default=0,
+        )
+        return max(hits, len(distinct)) >= 3 or repeated >= 3
 
     def _temperatures(self) -> tuple[float, ...]:
         values = []

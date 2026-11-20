@@ -306,3 +306,98 @@ def test_live_call_never_repeats_one_question_three_times(client, demo_catalogue
         run = run + 1 if current.split("?")[0] == previous.split("?")[0] else 1
         longest = max(longest, run)
     assert longest <= 2, replies
+
+
+# ---- live calls 2026-11-20 evening ---------------------------------------
+
+@pytest.mark.parametrize("heard", ["200 K 2 PAKTA CHAHIYAY", "200 के 2 पत्ते चाहिए", "दो सौ के दो पत्ते चाहिए"])
+def test_strength_and_count_without_a_name_asks_yes_or_no(client, demo_catalogue, heard):
+    voice = session(client)
+    asked = say(client, voice, heard)
+    assert asked["assistant_text"] == "क्या आपको BRUFEN 200MG की 2 स्ट्रिप चाहिए? हाँ या नहीं बोलें।"
+    assert asked["order_summary"] is None
+    assert cart(say(client, voice, "हाँ")) == [("MED-00013", 2, "STRIP")]
+
+
+def test_strength_guess_no_drops_it(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "200 K 2 PAKTA CHAHIYAY")
+    assert "नहीं जोड़ी" in say(client, voice, "नहीं")["assistant_text"]
+    assert say(client, voice, "dolo")["assistant_text"] == "DOLO 650MG की कितनी स्ट्रिप चाहिए?"
+
+
+def test_strength_guess_answered_with_another_medicine(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "200 K 2 PAKTA CHAHIYAY")
+    assert say(client, voice, "brufen 400")["assistant_text"] == "BRUFEN 400MG की कितनी स्ट्रिप चाहिए?"
+
+
+def test_strength_guess_unclear_answer_repeats_the_question(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "200 K 2 PAKTA CHAHIYAY")
+    again = say(client, voice, "NG")
+    assert again["assistant_text"] == "क्या आपको BRUFEN 200MG की 2 स्ट्रिप चाहिए? हाँ या नहीं बोलें।"
+    assert cart(say(client, voice, "haan ji")) == [("MED-00013", 2, "STRIP")]
+
+
+def test_strength_and_count_shared_by_two_medicines_asks_which_and_keeps_count(client, demo_catalogue):
+    voice = session(client)
+    asked = say(client, voice, "500 के 2 पत्ते चाहिए")
+    assert "CEROM 500" in asked["assistant_text"] and "CROCIN 500MG" in asked["assistant_text"]
+    assert cart(say(client, voice, "crocin")) == [("MED-00026", 2, "STRIP")]
+
+
+def test_count_with_small_number_only_is_not_a_strength_guess(client, demo_catalogue):
+    result = say(client, session(client), "2 पत्ते चाहिए")
+    assert result["order_summary"] is None and "STRENGTH" not in result["assistant_text"]
+    assert "हाँ या नहीं" not in result["assistant_text"]
+
+
+@pytest.mark.parametrize("heard", ["brufan 200 KDOPATTE CHAHIYE", "brufen 200 dopatte chahiye", "brufen 200 ke 2patte"])
+def test_merged_count_and_strip_word(client, demo_catalogue, heard):
+    assert cart(say(client, session(client), heard)) == [("MED-00013", 2, "STRIP")]
+
+
+def test_merged_count_as_quantity_answer(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "dolo")
+    assert cart(say(client, voice, "KDOPATTE")) == [("MED-00025", 2, "STRIP")]
+
+
+def test_two_names_but_one_clear_strength_picks_it(client, demo_catalogue):
+    voice = session(client)
+    picked = say(client, voice, "brufan 200 MG CEROM")
+    assert picked["assistant_text"] == "BRUFEN 200MG की कितनी स्ट्रिप चाहिए?"
+    assert cart(say(client, voice, "2 STRIP")) == [("MED-00013", 2, "STRIP")]
+
+
+def test_two_names_with_clashing_strengths_still_asks(client, demo_catalogue):
+    asked = say(client, session(client), "DOLO 650 BRUFIN CEROM 480")
+    assert asked["assistant_text"].startswith("कौन सी दवा चाहिए:")
+    assert "BRUFEN" in asked["assistant_text"] and "DOLO 650" in asked["assistant_text"]
+
+
+@pytest.mark.parametrize("heard", ["CREMAFFIN, DOLO 650", "brufin, dolo650", "brufan, dolo650, cainu650"])
+def test_number_inside_a_name_does_not_pick_between_two_names(client, demo_catalogue, heard):
+    assert say(client, session(client), heard)["assistant_text"].startswith("कौन सी दवा चाहिए:")
+
+
+@pytest.mark.parametrize("word", ["chahiye", "chahie", "chiyaye", "chahiyay", "chahiya", "cahye", "chaiye"])
+def test_chahiye_spellings(word):
+    from app.services.voice.intent import _CHAHIYE
+    assert _CHAHIYE.match(word)
+
+
+@pytest.mark.parametrize("word", ["chai", "che", "chhe", "cheese", "chips"])
+def test_not_chahiye(word):
+    from app.services.voice.intent import _CHAHIYE
+    assert not _CHAHIYE.match(word)
+
+
+def test_live_call_20_54_replayed(client, demo_catalogue):
+    voice = session(client)
+    first = say(client, voice, "200 K 2 PAKTA CHAHIYAY")
+    assert "BRUFEN 200MG की 2 स्ट्रिप" in first["assistant_text"]
+    assert cart(say(client, voice, "हाँ")) == [("MED-00013", 2, "STRIP")]
+    say(client, voice, "CONFIRM KRO")
+    assert say(client, voice, "CONFIRM")["order"] is not None

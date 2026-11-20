@@ -91,7 +91,9 @@ UNAMBIGUOUS_HINDI_HINTS = {
 
 # Whisper spells "चाहिए" in English letters many ways on phone audio:
 # chahiye, chahie, chaiye, chiyaye, chaahiye, chahiyee.
-_CHAHIYE = re.compile(r"^ch(?:a{1,2}h?i{1,2}|i)y?(?:a?y)?e{1,2}$")
+# Also "CHAHIYAY", "chahiya", "cahye" (live calls and phone clips); five
+# letters or more so "chai" or "che" (six) are not taken.
+_CHAHIYE = re.compile(r"^(?=\w{5,}$)ch?(?:a{1,2}h?i{0,2}|i)y?(?:a?y)?(?:e{1,2}|ay|ai|a|ye|aye)$")
 
 # English words that show the caller really switched to English. A Hindi
 # session switches on one request word ("add clomin", "help") or two small
@@ -363,6 +365,9 @@ UNIT_ALIASES: dict[OrderUnit, tuple[str, ...]] = {
         "pathe",
         "fatte",
         "phatte",
+        # "2 PAKTA" for "दो पत्ते" (live call 2026-11-20 20:54 IST).
+        "pakta",
+        "pakte",
         # Whisper's spellings of स्ट्रिप on phone audio ("DOSCRIP", "dos trip").
         "scrip",
         "scrips",
@@ -667,8 +672,12 @@ def _unit_for_alias(value: str) -> OrderUnit | None:
 
 _STRIP_WORD = r"(?:strips?|scrips?|stips?|streps?|stripes?|trips?|istrips?|shrips?)"
 # "DOESTRIP", "DOSCRIP", "teenstrip": number and unit heard as one word.
+# Hindi strip words in English letters, as Whisper writes them.
+_HINDI_STRIP_WORD = r"(?:patte|patta|pate|patey|pattey|pathe|fatte|phatte|pakta|pakte)"
+# "KDOPATTE" for "के दो पत्ते": a glued के/की is dropped as well.
 _MERGED_QUANTITY_UNIT = re.compile(
-    rf"(?<!\w)(ek|do|doe|dho|doh|teen|char|chaar|panch|paanch|\d{{1,3}})(?={_STRIP_WORD}(?!\w))",
+    rf"(?<!\w)(?:ke|ki|k)?(ek|do|doe|dho|doh|teen|char|chaar|panch|paanch|\d{{1,3}})"
+    rf"(?=(?:{_STRIP_WORD}|{_HINDI_STRIP_WORD})(?!\w))",
     re.IGNORECASE,
 )
 # "those strips", "egg strip": Whisper hears दो / एक as English words.
@@ -1196,3 +1205,22 @@ STRENGTH_ONLY_WORDS = {
     "wala", "wali", "wale", "वाला", "वाली", "वाले", "chahiye", "चाहिए", "चाहिये",
     "mg", "एमजी", "ml", "please", "ji", "जी", "milligram", "milligrams",
 } | set(_HUNDREDS_DIGITS) | _HUNDRED_WORDS | set(_TENS_WORDS)
+
+
+# A plain "yes" to "क्या आपको BRUFEN 200MG की 2 स्ट्रिप चाहिए?".
+_AFFIRMATIVE_WORDS = {
+    "हाँ", "हां", "हा", "haan", "han", "ha", "yes", "yeah", "yep", "ok", "okay",
+    "ओके", "sahi", "सही", "theek", "thik", "ठीक", "bilkul", "बिल्कुल", "correct",
+    "right", "confirm", "कन्फर्म", "कंफर्म",
+}
+_AFFIRMATIVE_FILLERS = {
+    "ji", "जी", "hai", "है", "chahiye", "चाहिए", "चाहिये", "please", "sir", "सर",
+    "kar", "करो", "karo", "kardo", "कर", "dijiye", "दीजिए",
+}
+
+
+def is_plain_affirmative(text: str) -> bool:
+    tokens = [fold_latin(token) for token in normalize_text(text).split()]
+    if not tokens or not any(token in _AFFIRMATIVE_WORDS for token in tokens):
+        return False
+    return all(token in _AFFIRMATIVE_WORDS or token in _AFFIRMATIVE_FILLERS for token in tokens)

@@ -59,6 +59,8 @@ from app.services.voice.intent import (
     DeterministicIntentParser,
     first_quantity_word,
     fold_latin,
+    clean_medicine_query,
+    is_plain_affirmative,
     is_plain_negative,
     normalize_spoken_strengths,
     split_spoken_hundreds,
@@ -542,6 +544,18 @@ class VoiceService:
                 ),
             )
 
+        if (
+            state.pending is not None
+            and state.pending.match_status == "STRENGTH_GUESS"
+            and is_plain_affirmative(text)
+        ):
+            guess = state.pending
+            state.pending = None
+            self._log_matching("strength_guess", text, guess.candidates, guess.candidates[0], "CONFIRMED")
+            return self._add_candidate(
+                voice, state, guess.candidates[0], guess.quantity, guess.unit, language
+            )
+
         # Correction markers take precedence over optional LLM/add classification,
         # but never over an explicit control phrase. Hindi/English confirmation
         # phrases such as "confirm kar do" contain correction words ("kar do").
@@ -603,6 +617,12 @@ class VoiceService:
         strength_value = self._strength_only_value(text)
         if strength_value is not None:
             return self._offer_by_strength(voice, state, strength_value, language)
+        guess = self._strength_with_count(text)
+        if guess is not None:
+            value, guess_quantity, guess_unit = guess
+            return self._offer_by_strength(
+                voice, state, value, language, guess_quantity, guess_unit, ask_first=True
+            )
         if parsed.intent == VoiceIntent.SELECT_CANDIDATE:
             return TurnDraft(
                 intent=VoiceIntent.SELECT_CANDIDATE,
@@ -790,6 +810,15 @@ class VoiceService:
                     voice, state, selected, quantity, unit, language
                 )
             heard_names = list(dict.fromkeys(c.medicine_name for c in result.candidates))
+            separate = self._strength_apart_from_names(text, result.candidates) if mentioned else None
+            if mentioned and len(heard_names) > 1 and separate is not None:
+                # Live call: "brufan 200 MG CEROM" (CEROM from Whisper's hint);
+                # 200 MG fits only BRUFEN 200MG, so there is nothing to ask.
+                selected = separate
+                self._log_matching("add_fuzzy", text, result.candidates, selected, "STRICT_MATCH")
+                return self._add_candidate(
+                    voice, state, selected, quantity, unit, language
+                )
             if mentioned and len(heard_names) > 1:
                 # Live call: "brufan, dolo650, cainu650". Whisper often adds a
                 # name from its hint, so ask which one by name instead of
@@ -952,6 +981,25 @@ class VoiceService:
 
         if pending.match_status == "NAMES_HEARD":
             return self._narrow_to_named_medicine(voice, state, pending, text, language)
+        if pending.match_status == "STRENGTH_GUESS":
+            # Not a plain yes/no: a medicine or strength is a new request;
+            # anything else repeats the question (at most three times).
+            if (
+                self.matching.suggestions_from_utterance(text)
+                or extract_strength_tokens(text)
+                or spoken_hundreds(text)
+            ):
+                state.pending = None
+                return self._handle_text(voice, state, text, language)
+            gave_up = self._count_retry(state, pending, language)
+            if gave_up is not None:
+                return gave_up
+            return TurnDraft(
+                intent=VoiceIntent.SELECT_CANDIDATE,
+                language=language,
+                candidates=pending.candidates,
+                assistant_text=self._candidate_retry_prompt(pending, language),
+            )
 
         # Live call: "650." while ARACHITOL's variant was being chosen. A
         # strength that only other medicines have means the caller moved on.
@@ -1176,6 +1224,57 @@ class VoiceService:
             return None
         return value
 
+    def _strength_apart_from_names(self, text, candidates):
+        """The one candidate fitting a strength said apart from the names:
+        "brufan 200 MG CEROM" -> BRUFEN 200MG. The 650 in "DOLO 650" is part
+        of a name, and digits stuck to junk ("cainu650") are not counted."""
+        rest = text
+        for candidate in {c.medicine_name: c for c in candidates}.values():
+            rest = self._without_medicine_name(rest, candidate)
+        rest = normalize_spoken_strengths(rest)
+        said = {
+            str(int(match.group(1)))
+            for match in re.finditer(r"(?<![^\W\d_])(\d{2,4})(?!\d)", rest)
+        } | spoken_hundreds(rest)
+        for candidate in candidates:
+            said -= pack_size_tokens(candidate.description or "")
+        if not said:
+            return None
+        spoken = attributes_from_text(rest, strengths=said)
+        fitting = [c for c in candidates if strictly_matches(c, spoken)]
+        return fitting[0] if len(fitting) == 1 else None
+
+    def _strength_with_count(self, text: str):
+        """"200 के 2 पत्ते चाहिए" with the name lost: (strength, count, unit),
+        when nothing but a strength, a count and filler words was heard."""
+        quantity, unit, remaining = extract_quantity_unit(text)
+        if quantity is None:
+            return None
+        values = extract_strength_tokens(text) | spoken_hundreds(remaining)
+        if len(values) != 1:
+            return None
+        value = next(iter(values))
+        has_unit = bool(re.search(r"\d\s*(?:mg|mcg|ml|gm|g|iu)(?!\w)", normalize_spoken_strengths(remaining), re.IGNORECASE))
+        if not value.isdigit() or (int(value) <= self.settings.max_order_item_quantity and not has_unit):
+            return None
+        leftover = [
+            token for token in clean_medicine_query(split_spoken_hundreds(remaining)[1]).split()
+            if len(token) > 1 and fold_latin(token) not in STRENGTH_ONLY_WORDS
+        ]
+        if leftover:
+            return None
+        return value, quantity, unit
+
+    def _strength_guess_question(self, pending, language: str) -> str:
+        candidate = pending.candidates[0]
+        label = spoken_name(candidate)
+        unit = pending.unit or default_unit_for(candidate.description) or OrderUnit.STRIP
+        return _text(
+            f"क्या आपको {label} की {pending.quantity} {_unit_label(unit, 'hi')} चाहिए? हाँ या नहीं बोलें।",
+            f"Do you want {pending.quantity} {_PLURAL_EN[OrderUnit(unit).value]} of {label}? Please say yes or no.",
+            language,
+        )
+
     def _strength_candidates(self, value: str) -> list[MedicineMatchCandidate]:
         candidates = []
         for medicine in self.matching.repository.list_all_active():
@@ -1190,7 +1289,8 @@ class VoiceService:
         return sorted(candidates, key=lambda c: c.medicine_id)
 
     def _offer_by_strength(
-        self, voice, state, value: str, language: str, quantity=None, unit=None
+        self, voice, state, value: str, language: str, quantity=None, unit=None,
+        ask_first: bool = False,
     ) -> TurnDraft:
         """Only the strength was heard: offer the catalogue medicine(s) that
         have it. One match asks its quantity (the caller hears the name and
@@ -1206,6 +1306,24 @@ class VoiceService:
                     "Which medicine do you want? Please say its name too.",
                     language,
                 ),
+            )
+        if len(candidates) == 1 and ask_first and quantity is not None:
+            # Live call: "200 K 2 PAKTA CHAHIYAY" (no name heard). Ask like a
+            # pharmacist would instead of adding a guess or saying not found.
+            unit = unit or default_unit_for(candidates[0].description)
+            state.pending = VoicePendingState(
+                kind="candidate",
+                candidates=candidates,
+                quantity=quantity,
+                unit=unit,
+                requested_text=value,
+                match_status="STRENGTH_GUESS",
+            )
+            return TurnDraft(
+                intent=VoiceIntent.ADD_ITEM,
+                language=language,
+                candidates=candidates,
+                assistant_text=self._strength_guess_question(state.pending, language),
             )
         if len(candidates) == 1:
             return self._add_candidate(voice, state, candidates[0], quantity, unit, language)
@@ -2020,6 +2138,8 @@ class VoiceService:
         if pending.match_status == "NAMES_HEARD":
             names = list(dict.fromkeys(c.medicine_name for c in pending.candidates))
             return self._which_medicine_prompt(names, language)
+        if pending.match_status == "STRENGTH_GUESS":
+            return self._strength_guess_question(pending, language)
         fuzzy = pending.match_status == "NOT_FOUND"
         if fuzzy:
             return _text(

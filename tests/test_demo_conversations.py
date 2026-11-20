@@ -87,6 +87,17 @@ def test_tablet_or_liquid(client, demo_catalogue, answer, medicine):
     assert cart(say(client, voice, "2"))[0][0] == medicine
 
 
+def test_form_word_that_picks_a_variant_is_not_the_unit(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "corflam")
+    picked = say(client, voice, "गोली वाली")
+    assert picked["assistant_text"] == "CORFLAM TAB की कितनी स्ट्रिप चाहिए?"
+    assert cart(say(client, voice, "2")) == [("MED-00007", 2, "STRIP")]
+    voice = session(client)
+    say(client, voice, "corflam")
+    assert cart(say(client, voice, "tab wali 10 goli")) == [("MED-00007", 10, "TABLET")]
+
+
 def test_injection_choice_and_unit(client, demo_catalogue):
     voice = session(client)
     assert say(client, voice, "arachitol")["assistant_text"] == "ARACHITOL INJ चाहिए या NANO SUGAR FREE?"

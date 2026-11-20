@@ -1011,6 +1011,10 @@ class VoiceService:
             "STRICT_MATCH",
         )
         quantity, unit, _ = extract_quantity_unit(text)
+        if quantity is None:
+            # "गोली वाली" picks the tablet variant; without a number it is not
+            # the unit (CORFLAM TAB 15'S is still counted in strips).
+            unit = None
         quantity = quantity or pending.quantity
         unit = unit or pending.unit
         return self._add_candidate(

@@ -932,6 +932,22 @@ class VoiceService:
             voice, state, selected, quantity, unit, language
         )
 
+    def _without_medicine_name(
+        self, text: str, candidate: MedicineMatchCandidate
+    ) -> str:
+        """The caller's words minus the medicine's own name and aliases:
+        "DOLO 650 2" -> "2", "dolo650" -> "", "डोलो के दो पत्ते" -> "के दो पत्ते"."""
+        name = normalize_text(candidate.medicine_name or "")
+        if not name:
+            return text
+        phrases = {name} | {
+            alias for alias, target in self.matching._aliases().items() if target == name
+        }
+        for phrase in sorted(phrases, key=len, reverse=True):
+            pattern = r"(?<!\w)" + r"\W*".join(re.escape(t) for t in phrase.split()) + r"(?!\w)"
+            text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+        return text
+
     def _names_another_medicine(self, text: str, current_names: set[str]):
         """Live call: while BRUFEN's quantity was pending, the caller said
         "ARACHITOL INJ ... BOX" and BRUFEN got the unit "box". A different
@@ -984,7 +1000,24 @@ class VoiceService:
             state.pending = None
             return self._handle_add(voice, state, parsed_new, text, language)
 
-        spoken = self._selection_attributes(text, [pending_candidate])
+        # Live call 2026-11-20: repeating "DOLO 650" was read as 650 strips, and
+        # "DOLO 650 2" as strengths {650, 2}. The count and any strength come
+        # from what the caller said besides the medicine's own name.
+        count_text = self._without_medicine_name(text, pending_candidate)
+        quantity, unit, remaining = extract_quantity_unit(count_text)
+        if quantity is None:
+            quantity = extract_quantity(count_text)
+        if quantity is None and set(normalize_text(count_text).split()) & DO_AS_ENGLISH_WORDS:
+            # Answer to "how many?": Whisper often writes दो as "those" or "doe".
+            quantity = 2
+        if quantity is None:
+            # "DO SHRIP", "the two strip": the count is there, the unit garbled.
+            quantity = first_quantity_word(count_text)
+        strength_text = remaining
+        if quantity is not None:
+            strength_text = re.sub(rf"(?<!\d){quantity}(?!\d)", " ", remaining, count=1)
+
+        spoken = self._selection_attributes(strength_text, [pending_candidate])
         enforce_attributes = bool(
             parsed_new.medicine_id
             or spoken.strength_units
@@ -998,23 +1031,14 @@ class VoiceService:
             )
             return self._not_found_draft(state, language)
 
-        if has_ambiguous_quantity_answer(text):
+        if has_ambiguous_quantity_answer(count_text):
             return TurnDraft(
                 intent=VoiceIntent.ADD_ITEM,
                 language=language,
                 assistant_text=self._repeat_quantity_text(language),
             )
 
-        quantity, unit, _ = extract_quantity_unit(text)
         quantity = quantity or pending.quantity
-        if quantity is None:
-            quantity = extract_quantity(text)
-        if quantity is None and set(normalize_text(text).split()) & DO_AS_ENGLISH_WORDS:
-            # Answer to "how many?": Whisper often writes दो as "those" or "doe".
-            quantity = 2
-        if quantity is None:
-            # "DO SHRIP", "the two strip": the count is there, the unit garbled.
-            quantity = first_quantity_word(text)
         unit = unit or pending.unit
         self._log_matching(
             "quantity_pending", text, [pending_candidate], pending_candidate,

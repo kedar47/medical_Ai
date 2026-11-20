@@ -479,3 +479,36 @@ def test_live_call_09_28_clomin_and_four_strips(client,seed_catalogue):
     result=turn(client,session,'CHARIS TIP')
     item=result['order_summary']['items'][0]
     assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00003',4,'STRIP')
+
+
+# Live call 2026-11-20 18:59 IST: DOLO 650's quantity step.
+@pytest.fixture
+def dolo_650(db_session,seed_catalogue):
+    from app.database.models import Medicine
+    db_session.add(Medicine(medicine_id="MED-00025",medicine_name="DOLO 650",description="TAB 650MG 15'S",source_serial_number="17",source_row=25))
+    db_session.commit()
+
+
+@pytest.mark.parametrize('repeat', ['DOLO 650','dolo650','paracet, dolo 650'])
+def test_repeating_a_name_with_a_number_is_not_the_quantity(client,dolo_650,repeat):
+    session=voice(client)
+    turn(client,session,'DOLO 650')
+    result=turn(client,session,repeat)
+    assert result['order_summary'] is None
+    assert '1 से 100' not in result['assistant_text'] and 'मात्रा' in result['assistant_text']
+
+
+@pytest.mark.parametrize('answer,quantity', [('DOLO 650 2',2),('dolo 650 ke do patte',2),('डोलो के तीन पत्ते',3),('2',2)])
+def test_quantity_answer_with_the_name_number_in_it(client,dolo_650,answer,quantity):
+    session=voice(client)
+    turn(client,session,'DOLO 650')
+    result=turn(client,session,answer)
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00025',quantity,'STRIP')
+
+
+def test_conflicting_strength_in_quantity_answer_is_still_refused(client,seed_catalogue):
+    session=voice(client)
+    turn(client,session,'BRUFEN 200 MG-17S')
+    result=turn(client,session,'BRUFEN 400 MG 2')
+    assert result['order_summary'] is None

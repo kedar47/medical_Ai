@@ -91,7 +91,19 @@ class FasterWhisperSTT:
             1 for piece in pieces
             if piece and any(fuzz.ratio(piece, name) >= 80 for name in names)
         )
-        return hits >= 3
+        # The hint echoed without commas: "CREMAFFIN CEROM 500 CETIRIZINE
+        # CLOMIN DOLO 650." Count whole names, ignoring ones inside a longer
+        # match ("dolo" in "dolo 650").
+        lowered = " ".join(transcript.casefold().replace(",", " ").split())
+        found = {
+            name for name in names
+            if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", lowered)
+        }
+        distinct = {
+            name for name in found
+            if not any(name != other and name in other for other in found)
+        }
+        return max(hits, len(distinct)) >= 3
 
     def _temperatures(self) -> tuple[float, ...]:
         values = []
@@ -216,7 +228,10 @@ class FasterWhisperSTT:
                 # The aliases still apply in text matching after transcription.
                 latin_names = [name for name in self._vocabulary if name.isascii()]
                 if latin_names:
-                    prompt_parts.append("Medicine names: " + ", ".join(latin_names))
+                    # No commas: with "Medicine names: A, B, C" Whisper kept
+                    # continuing the list on phone audio (", brufin 400",
+                    # "brufan, dolo650, ..."). Measured on the demo server.
+                    prompt_parts.append("Medicines " + " ".join(latin_names) + ".")
                 initial_prompt = " ".join(prompt_parts)[:600] or None
                 vad_parameters = None
                 if self.settings.voice_stt_vad_filter:

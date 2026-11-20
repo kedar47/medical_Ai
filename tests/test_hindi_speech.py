@@ -119,7 +119,7 @@ def test_initial_prompt_uses_english_letter_names_only(monkeypatch):
     adapter.set_vocabulary(["BRUFEN","ब्रूफेन","brufin","क्लोमिन"])
     monkeypatch.setattr(adapter,'_get_model',lambda:Model())
     adapter.transcribe(b'audio',filename='test.wav',language='hi')
-    assert recorded['initial_prompt']=="Medicine names: BRUFEN, brufin"
+    assert recorded["initial_prompt"]=="Medicines BRUFEN brufin."
 
 
 def test_tts_collapses_padded_catalogue_whitespace(monkeypatch):
@@ -512,3 +512,68 @@ def test_conflicting_strength_in_quantity_answer_is_still_refused(client,seed_ca
     turn(client,session,'BRUFEN 200 MG-17S')
     result=turn(client,session,'BRUFEN 400 MG 2')
     assert result['order_summary'] is None
+
+
+# Live call 2026-11-20 19:12 IST: "brufan, dolo650, cainu650" (Whisper added
+# "brufan" from its hint) got "सही दवा का पूरा नाम ... बताएं" with every variant.
+def test_two_names_heard_asks_which_medicine_by_name(client,dolo_650):
+    session=voice(client)
+    first=turn(client,session,'brufan, dolo650, cainu650')
+    assert 'कौन सी दवा चाहिए: BRUFEN या DOLO 650' in first['assistant_text']
+    assert 'पूरा नाम' not in first['assistant_text']
+    asked=turn(client,session,'dolo')
+    assert asked['order_summary'] is None and 'मात्रा' in asked['assistant_text']
+    result=turn(client,session,'2')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00025',2,'STRIP')
+
+
+def test_two_names_heard_then_name_and_quantity_in_one_answer(client,dolo_650):
+    session=voice(client)
+    turn(client,session,'brufin, dolo650')
+    result=turn(client,session,'dolo 650 ke do patte')
+    item=result['order_summary']['items'][0]
+    assert (item['medicine_id'],item['quantity'],item['unit'])==('MED-00025',2,'STRIP')
+
+
+def test_two_names_heard_then_multi_variant_name_asks_strength(client,dolo_650):
+    session=voice(client)
+    turn(client,session,'brufin, dolo650')
+    narrowed=turn(client,session,'brufen')
+    assert len(narrowed['candidates'])==3 and 'पहला' in narrowed['assistant_text']
+    picked=turn(client,session,'400')
+    assert 'मात्रा' in picked['assistant_text']
+    result=turn(client,session,'2')
+    assert result['order_summary']['items'][0]['medicine_id']=='MED-00014'
+
+
+def test_unclear_answer_to_which_medicine_asks_again(client,dolo_650):
+    session=voice(client)
+    turn(client,session,'brufin, dolo650')
+    again=turn(client,session,'NG')
+    assert 'कौन सी दवा चाहिए' in again['assistant_text']
+
+
+def test_misheard_name_prompt_no_longer_asks_for_full_name(client,seed_catalogue):
+    english=client.post('/voice/sessions',json={'language':'en'}).json()
+    result=turn(client,english,'add brufn one strip')
+    assert result['candidates'] and 'full name' not in result['assistant_text']
+    assert 'medicine ID' in result['assistant_text']
+
+
+def test_hint_echoed_without_commas_is_no_speech(monkeypatch):
+    from types import SimpleNamespace
+    from app.core.exceptions import NoSpeechError
+    from app.services.voice.stt import FasterWhisperSTT
+    from app.core.config import get_settings
+    texts=["CREMAFFIN CEROM 500 CETIRIZINE CLOMIN DOLO 650."]
+    class Model:
+        def transcribe(self,path,**kwargs):
+            return [SimpleNamespace(text=texts[0])],SimpleNamespace(language="hi",language_probability=1,duration=2)
+    adapter=FasterWhisperSTT(get_settings())
+    adapter.set_vocabulary(["BRUFEN","brufin","CREMAFFIN","CEROM 500","CETIRIZINE","CLOMIN TAB","clomin","DOLO 650","dolo","dolo650"])
+    monkeypatch.setattr(adapter,'_get_model',lambda:Model())
+    with pytest.raises(NoSpeechError):
+        adapter.transcribe(_wav_seconds(2.0),filename='call.wav',language='hi',allow_fallback=False)
+    texts[0]="brufin dolo 650"
+    assert adapter.transcribe(_wav_seconds(2.0),filename='call.wav',language='hi',allow_fallback=False).transcript=="brufin dolo 650"

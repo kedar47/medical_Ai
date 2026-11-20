@@ -754,6 +754,26 @@ class VoiceService:
                 return self._add_candidate(
                     voice, state, selected, quantity, unit, language
                 )
+            heard_names = list(dict.fromkeys(c.medicine_name for c in result.candidates))
+            if mentioned and len(heard_names) > 1:
+                # Live call: "brufan, dolo650, cainu650". Whisper often adds a
+                # name from its hint, so ask which one by name instead of
+                # listing every variant of both and asking for the full name.
+                self._log_matching("add_fuzzy", text, result.candidates, None, "NAMES_HEARD")
+                state.pending = VoicePendingState(
+                    kind="candidate",
+                    candidates=result.candidates,
+                    quantity=quantity,
+                    unit=unit,
+                    requested_text=query,
+                    match_status="NAMES_HEARD",
+                )
+                return TurnDraft(
+                    intent=VoiceIntent.ADD_ITEM,
+                    language=language,
+                    candidates=result.candidates,
+                    assistant_text=self._which_medicine_prompt(heard_names, language),
+                )
             self._log_matching("add_fuzzy", text, result.candidates, None, "CLARIFICATION_REQUIRED")
             state.pending = VoicePendingState(
                 kind="candidate",
@@ -893,6 +913,9 @@ class VoiceService:
             state.pending = None
             return self._handle_add(voice, state, parsed_new, text, language)
 
+        if pending.match_status == "NAMES_HEARD":
+            return self._narrow_to_named_medicine(voice, state, pending, text, language)
+
         spoken = self._selection_attributes(text, pending.candidates)
         selected = self._select_candidate(pending, text)
         if selected is None:
@@ -930,6 +953,49 @@ class VoiceService:
         unit = unit or pending.unit
         return self._add_candidate(
             voice, state, selected, quantity, unit, language
+        )
+
+    def _narrow_to_named_medicine(self, voice, state, pending, text, language):
+        """Answer to "BRUFEN या DOLO 650?": keep the one medicine the caller
+        named. One variant is added (quantity asked if missing); several
+        variants are picked by strength or offered as पहला/दूसरा."""
+        chosen = [c for c in pending.candidates if self._mentions_candidate_name(text, c)]
+        names = list(dict.fromkeys(c.medicine_name for c in chosen))
+        if len(names) != 1:
+            all_names = list(dict.fromkeys(c.medicine_name for c in pending.candidates))
+            return TurnDraft(
+                intent=VoiceIntent.SELECT_CANDIDATE,
+                language=language,
+                candidates=pending.candidates,
+                assistant_text=self._which_medicine_prompt(all_names, language),
+            )
+        count_text = self._without_medicine_name(text, chosen[0])
+        quantity, unit, _ = extract_quantity_unit(count_text)
+        quantity = quantity or pending.quantity
+        unit = unit or pending.unit
+        if len(chosen) == 1:
+            selected = chosen[0]
+        else:
+            selected = self._select_candidate_from_strength(chosen, text)
+        if selected is not None:
+            self._log_matching("candidate_pending", text, pending.candidates, selected, "STRICT_MATCH")
+            return self._add_candidate(voice, state, selected, quantity, unit, language)
+        state.pending = pending.model_copy(update={
+            "candidates": chosen, "match_status": "NAME_HEARD",
+            "quantity": quantity, "unit": unit,
+        })
+        return TurnDraft(
+            intent=VoiceIntent.SELECT_CANDIDATE,
+            language=language,
+            candidates=chosen,
+            assistant_text=self._candidate_prompt(chosen, language, fuzzy=False),
+        )
+
+    def _which_medicine_prompt(self, names: list[str], language: str) -> str:
+        return _text(
+            "कौन सी दवा चाहिए: " + " या ".join(names) + "? सिर्फ़ दवा का नाम बताएं।",
+            "Which medicine do you want: " + " or ".join(names) + "? Just say its name.",
+            language,
         )
 
     def _without_medicine_name(
@@ -1652,8 +1718,8 @@ class VoiceService:
         options = self._format_candidates(candidates)
         if fuzzy:
             return _text(
-                "सही दवा का पूरा नाम, strength, या medicine ID बताएं: ",
-                "Please say the correct full name, strength, or medicine ID: ",
+                "कौन सी दवा चाहिए? दवा का नाम और strength, या medicine ID बताएं: ",
+                "Which medicine do you want? Say its name and strength, or the medicine ID: ",
                 language,
             ) + options
         return _text(
@@ -1667,11 +1733,14 @@ class VoiceService:
         pending: VoicePendingState,
         language: str,
     ) -> str:
+        if pending.match_status == "NAMES_HEARD":
+            names = list(dict.fromkeys(c.medicine_name for c in pending.candidates))
+            return self._which_medicine_prompt(names, language)
         fuzzy = pending.match_status == "NOT_FOUND"
         if fuzzy:
             return _text(
-                "सही दवा का पूरा नाम, strength, या medicine ID बताएं: ",
-                "Please say the correct full name, strength, or medicine ID: ",
+                "कौन सी दवा चाहिए? दवा का नाम और strength, या medicine ID बताएं: ",
+                "Which medicine do you want? Say its name and strength, or the medicine ID: ",
                 language,
             ) + self._format_candidates(pending.candidates)
         return _text(

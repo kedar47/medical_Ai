@@ -23,7 +23,9 @@ class VoicePendingState(BaseModel):
     requested_text: str | None = None
     # NAME_HEARD: an exact catalogue name was heard and only its variant is
     # open, so the caller may pick it by number, strength or flavour.
-    match_status: Literal["CLARIFICATION_REQUIRED", "NOT_FOUND", "NAME_HEARD"] | None = None
+    match_status: Literal["CLARIFICATION_REQUIRED", "NOT_FOUND", "NAME_HEARD", "NAMES_HEARD"] | None = None
+    # NAMES_HEARD: two or more exact catalogue names were heard (often one
+    # is Whisper echoing its hint); the caller picks one by saying its name.
 
 
 class VoiceState(BaseModel):

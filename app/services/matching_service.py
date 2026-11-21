@@ -191,11 +191,22 @@ class MedicineMatchingService:
         names = {normalize_text(m.medicine_name) for m in medicines}
         lexicon = {name: name for name in names}
         lexicon.update(self._aliases())
-        mentioned = set()
+        spans: dict[str, list[tuple[int, int]]] = {}
         for phrase, name in lexicon.items():
             parts = phrase.split()
-            if any(tokens[i:i+len(parts)] == parts for i in range(len(tokens)-len(parts)+1)):
-                mentioned.add(name)
+            for i in range(len(tokens) - len(parts) + 1):
+                if tokens[i:i + len(parts)] == parts:
+                    spans.setdefault(name, []).append((i, i + len(parts)))
+        # "नेबीस्टार 5" names NEBISTAR-5; the NEBISTAR inside it is not a
+        # second medicine. A name heard only inside a longer name is dropped.
+        mentioned = {
+            name for name, own in spans.items()
+            if not all(
+                any(a <= i and j <= b and (b - a) > (j - i) for other, theirs in spans.items()
+                    if other != name for a, b in theirs)
+                for i, j in own
+            )
+        }
         return [_candidate(m, "FUZZY_SUGGESTION") for m in sorted(medicines, key=lambda m: m.medicine_id)
                 if normalize_text(m.medicine_name) in mentioned][:self.settings.fuzzy_match_limit]
 

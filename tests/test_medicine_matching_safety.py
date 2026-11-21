@@ -146,8 +146,12 @@ def test_wrong_strength_for_exact_name_is_rejected(
 
     result = turn(client, voice_session_id, "add dolo 200 two strips")
 
+    # Rejected: nothing added and no yes/no offer of the other dose; the
+    # caller hears which strength the list has.
     assert result["order_summary"] is None
-    assert result["assistant_text"] == NOT_FOUND_TEXT[result["language"]]
+    assert result["assistant_text"] == "Strength 200 of DOLO 650 is not in our list. We have DOLO 650MG."
+    follow_up = turn(client, voice_session_id, "yes")
+    assert not (follow_up.get("order_summary") or {}).get("items")
 
 
 def test_hindi_wrong_strength_uses_exact_not_found_message(
@@ -161,7 +165,7 @@ def test_hindi_wrong_strength_uses_exact_not_found_message(
 
     assert result["order_summary"] is None
     assert result["language"] == "hi"
-    assert result["assistant_text"] == NOT_FOUND_TEXT["hi"]
+    assert result["assistant_text"] == "DOLO 650 की 200 strength हमारी लिस्ट में नहीं है। लिस्ट में DOLO 650MG है।"
 
 
 def test_unknown_medicine_does_not_reuse_pending_dolo(

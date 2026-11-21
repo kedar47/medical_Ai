@@ -59,7 +59,12 @@ _FORM_ALIASES = {
     "injection": "inj",
     "injections": "inj",
     "syrup": "syrup",
+    # "BECOSULES SYP 100ML": catalogue shorthand; सिरप as Sarvam writes it.
+    "syp": "syrup",
+    "सिरप": "syrup",
+    "सीरप": "syrup",
     "susp": "suspension",
+    "सस्पेंशन": "suspension",
     "suspension": "suspension",
     "drop": "drops",
     "drops": "drops",
@@ -197,6 +202,13 @@ def strictly_matches(
     spoken: MedicineAttributes,
 ) -> bool:
     catalogue = attributes_from_candidate(candidate)
+    # Callers say "syrup" for a suspension ("कैलपोल 250 सिरप").
+    if "suspension" in catalogue.formulations:
+        catalogue = MedicineAttributes(
+            strengths=catalogue.strengths,
+            strength_units=catalogue.strength_units,
+            formulations=catalogue.formulations | {"syrup"},
+        )
     if spoken.strengths and not spoken.strengths <= catalogue.strengths:
         return False
     if spoken.strength_units and not (
@@ -228,8 +240,8 @@ def spoken_strengths(text: str) -> set[str]:
 
 NOT_FOUND_TEXT = {
     # With examples: a first-time caller (the client) does not know the list.
-    "hi": "यह दवा हमारी लिस्ट में नहीं मिली। कृपया दवा का नाम दोबारा बताइए, जैसे डोलो 650 या क्रोसिन।",
-    "en": "I could not find that medicine in our list. Please say the name again, for example Dolo 650 or Crocin.",
+    "hi": "यह दवा हमारी लिस्ट में नहीं मिली। कृपया दवा का नाम दोबारा बताइए, जैसे डोलो 650 या ब्रूफेन 400।",
+    "en": "I could not find that medicine in our list. Please say the name again, for example Dolo 650 or Brufen 400.",
 }
 
 

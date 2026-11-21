@@ -217,7 +217,10 @@ async def handle_media(ws: WebSocket, factory):
     close_source, close_code, close_reason = "none", None, None
     stop_packet = None
     started, last_speech = time.monotonic(), time.monotonic()
-    buffer = UtteranceBuffer(s.telephony_vad_threshold)
+    buffer = UtteranceBuffer(
+        s.telephony_vad_threshold,
+        max_seconds=25 if s.voice_stt_provider == "sarvam" and s.sarvam_api_key else 12,
+    )
     queue = asyncio.Queue(maxsize=s.telephony_turn_queue_size)
     playback = None
     playback_kind = None

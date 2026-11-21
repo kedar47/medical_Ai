@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     voice_max_turns: int = Field(default=100, ge=1)
     voice_max_tts_chars: int = Field(default=600, ge=1)
     voice_preload_models: bool = False
+    # "sarvam": Sarvam AI speech-to-text (Indian languages, 8 kHz phone audio),
+    # with local Whisper as automatic backup. Needs SARVAM_API_KEY.
+    voice_stt_provider: str = Field(default="faster-whisper", pattern="^(faster-whisper|sarvam)$")
+    sarvam_api_key: str = ""
+    sarvam_stt_model: str = "saarika:v2.5"
+    sarvam_stt_language: str = "unknown"
+    sarvam_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
     voice_stt_model: str = "small"
     voice_stt_device: str = "cpu"
     voice_stt_compute_type: str = "int8"

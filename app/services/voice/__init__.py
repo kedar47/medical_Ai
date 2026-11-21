@@ -40,9 +40,13 @@ def build_stt(settings: Settings) -> SpeechToText:
     """
     with _shared_lock:
         adapter = _shared_engines.get("stt")
-        if isinstance(adapter, FasterWhisperSTT):
+        if adapter is not None:
             return adapter
         adapter = FasterWhisperSTT(settings)
+        if settings.voice_stt_provider == "sarvam" and settings.sarvam_api_key:
+            from app.services.voice.sarvam_stt import SarvamSTT
+
+            adapter = SarvamSTT(settings, fallback=adapter)
         _shared_engines["stt"] = adapter
         return adapter
 

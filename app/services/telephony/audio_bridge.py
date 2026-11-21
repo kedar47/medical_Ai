@@ -102,11 +102,14 @@ def clear_reply_cache() -> None:
 class UtteranceBuffer:
     """Bounded energy endpointing, not clinical/phonetic recognition.
 
-    Caller speech is emitted after 700 ms silence or 12 seconds maximum.
+    Caller speech is emitted after 700 ms silence or max_seconds (default 12).
     Silence and packet fragments are bounded even if an attacker never pauses.
     """
-    def __init__(self, threshold: int = 450):
+    def __init__(self, threshold: int = 450, max_seconds: int = 12):
         self.threshold = threshold
+        # 12 s suits local Whisper. Sarvam takes up to 30 s, and a caller
+        # reading out a list of medicines is not cut off mid-name.
+        self.max_frames = max(10, max_seconds * 10)
         self.pending = bytearray()
         self.audio = bytearray()
         self.silence = 0
@@ -135,7 +138,7 @@ class UtteranceBuffer:
                 if voiced:
                     voiced_bytes += FRAME_BYTES
                 self.silence = 0 if voiced else self.silence + FRAME_BYTES
-                if self.silence >= 7 * FRAME_BYTES or len(self.audio) >= 120 * FRAME_BYTES:
+                if self.silence >= 7 * FRAME_BYTES or len(self.audio) >= self.max_frames * FRAME_BYTES:
                     turns.append(bytes(self.audio))
                     self.audio.clear()
                     self.speaking, self.silence = False, 0

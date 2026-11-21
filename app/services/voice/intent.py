@@ -424,6 +424,10 @@ UNIT_ALIASES: dict[OrderUnit, tuple[str, ...]] = {
         "botal",
         "बोतल",
         "बोतलें",
+        # "एक बॉटल" as Sarvam writes it.
+        "बॉटल",
+        "बॉटल्स",
+        "बोटल",
         "सिरप",
         "syrup",
     ),
@@ -1219,6 +1223,73 @@ def is_plain_negative(text: str) -> bool:
         return False
     return all(token in NEGATIVE_WORDS or token in _NEGATIVE_FILLERS for token in tokens)
 
+
+
+# "नहीं" / "बस, इतना ही" / "that's all" to "और कोई दवा चाहिए?": the caller is done.
+_DONE_MARKERS = {
+    "bas", "बस", "itna", "itnahi", "इतना", "nothing", "done", "enough", "all",
+    "kuch", "kuchh", "कुछ", "पूरा", "pura", "hogaya", "होगया",
+}
+_DONE_FILLERS = _NEGATIVE_FILLERS | {
+    "hi", "ही", "aur", "और", "else", "that", "thats", "that's", "s", "is", "it",
+    "more", "hai", "है", "ho", "हो", "gaya", "गया", "gya", "baaki", "बाकी", "bus",
+    "itni", "इतनी", "abhi", "अभी", "nhi", "नहीं", "nahi", "no", "thanks", "thank",
+    "you", "dhanyavad", "धन्यवाद", "शुक्रिया", "ok", "okay", "ठीक", "theek", "thik",
+}
+
+
+def is_nothing_more(text: str) -> bool:
+    if is_plain_negative(text):
+        return True
+    tokens = [fold_latin(token) for token in normalize_text(text).split()]
+    if not tokens or len(tokens) > 7:
+        return False
+    if not any(token in _DONE_MARKERS or token in NEGATIVE_WORDS for token in tokens):
+        return False
+    return all(
+        token in _DONE_MARKERS or token in NEGATIVE_WORDS or token in _DONE_FILLERS
+        for token in tokens
+    )
+
+
+# "मेरा नाम महेश्वरी है" / "my name is Ravi" / "जी, रमेश बोल रहा हूँ" -> the name.
+_NAME_FILLERS = {
+    "मेरा", "मेरी", "नाम", "है", "हैं", "mera", "meri", "naam", "nam", "hai", "my",
+    "name", "is", "i", "am", "im", "this", "मैं", "main", "mai", "बोल", "रहा", "रही",
+    "हूँ", "हूं", "हु", "bol", "raha", "rahi", "hoon", "hun", "hu", "जी", "ji", "sir",
+    "सर", "madam", "मैडम", "नमस्ते", "namaste", "namaskar", "नमस्कार", "hello", "हेलो",
+    "हैलो", "hallo", "hi", "हाय", "हाँ", "हां", "haan", "han", "से", "se", "यह", "ये",
+    "speaking", "here", "its", "it", "s", "the", "जी।", "बोल रहा", "ok", "okay", "ओके",
+}
+_NOT_A_NAME = {
+    "नहीं", "नही", "nahi", "no", "yes", "दवा", "dawa", "dawai", "दवाई", "medicine",
+    "order", "ऑर्डर", "आर्डर", "confirm", "कन्फर्म", "cancel", "कैंसल", "strip",
+    "स्ट्रिप", "पत्ता", "पत्ते", "tablet", "टैबलेट", "गोली", "चाहिए", "chahiye",
+    "बताइए", "क्या", "kya", "what", "हेल्प", "help", "summary", "सारांश", "बस", "bas",
+}
+
+
+def is_only_greeting(text: str) -> bool:
+    tokens = [fold_latin(token) for token in normalize_text(text).split()]
+    return bool(tokens) and all(token in _NAME_FILLERS for token in tokens)
+
+
+def extract_caller_name(text: str) -> str | None:
+    """The caller's name from a short answer to "आपका नाम बताइए", else None."""
+    tokens = normalize_text(text).split()
+    if not tokens or len(tokens) > 8 or any(ch.isdigit() for ch in text):
+        return None
+    folded = [fold_latin(token) for token in tokens]
+    if any(token in _NOT_A_NAME or token in NEGATIVE_WORDS for token in folded):
+        return None
+    if extract_quantity(text) is not None or spoken_hundreds(text) or quantity_values(text):
+        return None
+    if any(token in _HUNDREDS_DIGITS or token in _HUNDRED_WORDS or token in _TENS_WORDS for token in folded):
+        return None  # "छह सौ पचास": a strength, not a name
+    name = [t for t, f in zip(tokens, folded) if f not in _NAME_FILLERS]
+    if not name or len(name) > 6:
+        return None
+    return " ".join(part if not part.isascii() else part.capitalize() for part in name)
 
 STRENGTH_ONLY_WORDS = {
     "wala", "wali", "wale", "वाला", "वाली", "वाले", "chahiye", "चाहिए", "चाहिये",

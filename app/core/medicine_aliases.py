@@ -82,4 +82,6 @@ DEFAULT_MEDICINE_ALIASES: dict[str, str] = {
     "सेटानिल टीएम": "CETANIL-TM", "सिटानिल टीएम": "CETANIL-TM", "चिटानिल टीएम": "CETANIL-TM",
     "सेटानल टीएम": "CETANIL-TM", "सेटनिल टीएम": "CETANIL-TM", "cetanil tm": "CETANIL-TM", "setanil tm": "CETANIL-TM",
     "मैक्स्ट्रा पी": "MAXTRA-P", "मैक्सट्रा पी": "MAXTRA-P", "मैक्स्ट्रा-पी": "MAXTRA-P", "maxtra p": "MAXTRA-P",
+    # "दो स्ट्रिप बुफेन 400 चाहिए" (live call 2026-11-22).
+    "बुफेन": "BRUFEN", "बुफ़ेन": "BRUFEN", "bufen": "BRUFEN",
 }

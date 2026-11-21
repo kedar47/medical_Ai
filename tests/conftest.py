@@ -2,6 +2,8 @@ import os
 from collections.abc import Generator
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+# Tests never call Sarvam, even when a developer's .env switches it on.
+os.environ["VOICE_STT_PROVIDER"] = "faster-whisper"
 
 import pytest
 from fastapi.testclient import TestClient

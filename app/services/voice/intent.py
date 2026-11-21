@@ -1260,6 +1260,8 @@ _NAME_FILLERS = {
     "सर", "madam", "मैडम", "नमस्ते", "namaste", "namaskar", "नमस्कार", "hello", "हेलो",
     "हैलो", "hallo", "hi", "हाय", "हाँ", "हां", "haan", "han", "से", "se", "यह", "ये",
     "speaking", "here", "its", "it", "s", "the", "जी।", "बोल रहा", "ok", "okay", "ओके",
+    # "मुझे मेरा नाम नितिन प्रजापति है" (live call 2026-11-22).
+    "मुझे", "mujhe", "मेरे", "mere", "हमारा", "hamara", "हम", "hum", "जी,", "का", "ka",
 }
 _NOT_A_NAME = {
     "नहीं", "नही", "nahi", "no", "yes", "दवा", "dawa", "dawai", "दवाई", "medicine",

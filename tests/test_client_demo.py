@@ -70,6 +70,7 @@ def test_full_call_with_name_is_saved_with_the_order(client, client_catalogue, d
     ("महेश्वरी", "महेश्वरी"),
     ("जी, रमेश बोल रहा हूँ", "रमेश"),
     ("my name is ravi kumar", "Ravi Kumar"),
+    ("मुझे मेरा नाम नितिन प्रजापति है।", "नितिन प्रजापति"),
 ])
 def test_name_answers(client, client_catalogue, answer, name):
     reply = say(client, session(client), answer)["assistant_text"]
@@ -218,6 +219,7 @@ def test_client_sample_duphalac_and_syrup_choice(client, client_catalogue):
     ("कॉम्बी फ्लेम सिरप दो बोतल", [("MED-107150", 2, "BOTTLE")]),
     ("एलेग्रा एम दुपत्ते", [("MED-107122", 2, "STRIP")]),
     ("नेबी स्टार 5 के 50 पत्ते", [("MED-105671", 50, "STRIP")]),
+    ("दो स्ट्रिप बुफेन 400 चाहिए।", [("MED-00014", 2, "STRIP")]),
 ])
 def test_sarvam_ways_of_writing(client, client_catalogue, heard, expected):
     assert cart(say(client, session(client), heard)) == expected

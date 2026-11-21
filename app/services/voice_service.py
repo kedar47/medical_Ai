@@ -62,6 +62,7 @@ from app.services.voice.intent import (
     clean_medicine_query,
     is_plain_affirmative,
     is_plain_negative,
+    sounds_like_confirm,
     normalize_spoken_strengths,
     split_spoken_hundreds,
     spoken_hundreds,
@@ -140,8 +141,8 @@ def _text(hi: str, en: str, language: str) -> str:
 
 def initial_greeting_text(language: str) -> str:
     return _text(
-        "नमस्ते! मैं आपका मेडिसिन ऑर्डर असिस्टेंट हूँ। बताइए, आपको कौन-सी दवाई चाहिए?",
-        "Hello, welcome to Medicure. Which tablet would you like to order, and in what quantity?",
+        "नमस्ते! मैं आपका मेडिसिन ऑर्डर असिस्टेंट हूँ। दवा का नाम बताइए, जैसे डोलो 650 या ब्रूफेन 400।",
+        "Hello, welcome to Medicure. Please say the medicine name, for example Dolo 650 or Brufen 400.",
         language,
     )
 
@@ -566,6 +567,17 @@ class VoiceService:
             return self._add_candidate(
                 voice, state, guess.candidates[0], guess.quantity, guess.unit, language
             )
+
+        if (
+            state.pending is None
+            and state.summary_digest is not None
+            and state.guard.can_confirm(state.summary_digest)
+            and sounds_like_confirm(text)
+        ):
+            # Live calls: after "सही हो तो कन्फर्म कहें" Whisper wrote कन्फर्म as
+            # "GUNFORM" / "PANFAM", the agent said "not found" and the order was
+            # lost at the last step. Only right after the read-back.
+            return self._handle_confirm(voice, state, language)
 
         # Correction markers take precedence over optional LLM/add classification,
         # but never over an explicit control phrase. Hindi/English confirmation
@@ -1124,6 +1136,14 @@ class VoiceService:
         variants are picked by strength or offered as पहला/दूसरा."""
         chosen = [c for c in pending.candidates if self._mentions_candidate_name(text, c)]
         names = list(dict.fromkeys(c.medicine_name for c in chosen))
+        if not names:
+            # "PAHEL DALO" (पहला डालो): pick by position in the question.
+            asked = list(dict.fromkeys(c.medicine_name for c in pending.candidates))
+            position = extract_ordinal(text)
+            if position is not None and 1 <= position <= len(asked):
+                wanted = normalize_text(asked[position - 1])
+                chosen = [c for c in pending.candidates if normalize_text(c.medicine_name) == wanted]
+                names = [asked[position - 1]]
         if not names:
             # Live call: the question was built from Whisper's hint echo
             # ("CREMAFFIN ... DOLO 650") and the caller named neither, five

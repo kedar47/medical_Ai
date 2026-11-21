@@ -129,7 +129,7 @@ def test_voice_status_and_session_lifecycle(
     assert session["status"] == "ACTIVE"
     assert session["language"] == "hi"
     assert session["message"] == (
-        "नमस्ते! मैं आपका मेडिसिन ऑर्डर असिस्टेंट हूँ। बताइए, आपको कौन-सी दवाई चाहिए?"
+        "नमस्ते! मैं आपका मेडिसिन ऑर्डर असिस्टेंट हूँ। दवा का नाम बताइए, जैसे डोलो 650 या ब्रूफेन 400।"
     )
 
     fetched = client.get(

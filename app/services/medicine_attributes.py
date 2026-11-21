@@ -227,8 +227,9 @@ def spoken_strengths(text: str) -> set[str]:
 
 
 NOT_FOUND_TEXT = {
-    "hi": "यह दवा स्वीकृत कैटलॉग में नहीं मिली। कृपया नाम दोबारा या थोड़ा साफ़ बोलें।",
-    "en": "I could not find that medicine in the approved catalogue. Please repeat or clarify the name.",
+    # With examples: a first-time caller (the client) does not know the list.
+    "hi": "यह दवा हमारी लिस्ट में नहीं मिली। कृपया दवा का नाम दोबारा बताइए, जैसे डोलो 650 या क्रोसिन।",
+    "en": "I could not find that medicine in our list. Please say the name again, for example Dolo 650 or Crocin.",
 }
 
 

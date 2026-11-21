@@ -585,6 +585,9 @@ ORDINAL_WORDS = {
     "teesri": 3,
     # Whisper spellings on phone audio.
     "pela": 1,
+    # "PAHEL DALO" for "पहला डालो" (live call 2026-11-20 21:27 IST).
+    "pahel": 1,
+    "pehel": 1,
     "pehela": 1,
     "pahala": 1,
     "pahela": 1,
@@ -699,8 +702,17 @@ _NUMBER_HYPHEN = re.compile(r"(?<=\d)-(?=[^\W\d_])")
 DO_AS_ENGLISH_WORDS = {"those", "though", "dough", "doe", "dho", "doh"}
 
 
+# "DO A STRIP" for "दो स्ट्रिप": the "a" is not a second count (it made 1).
+_NUMBER_THEN_A = re.compile(
+    rf"(?<!\w)(ek|do|doe|teen|char|chaar|panch|paanch|\d{{1,3}})\s+(?:a|an)\s+"
+    rf"(?=(?:{_STRIP_WORD}|{_HINDI_STRIP_WORD})(?!\w))",
+    re.IGNORECASE,
+)
+
+
 def normalize_spoken_quantities(text: str) -> str:
     text = _NUMBER_HYPHEN.sub(" ", text)
+    text = _NUMBER_THEN_A.sub(lambda match: match.group(1) + " ", text)
     text = _MERGED_QUANTITY_UNIT.sub(lambda match: match.group(1) + " ", text)
     return _NUMBER_AS_ENGLISH.sub(
         lambda match: _NUMBER_AS_ENGLISH_VALUE.get(match.group(1).lower(), "do") + " ", text
@@ -1231,3 +1243,26 @@ def is_plain_affirmative(text: str) -> bool:
     if not tokens or not any(token in _AFFIRMATIVE_WORDS for token in tokens):
         return False
     return all(token in _AFFIRMATIVE_WORDS or token in _AFFIRMATIVE_FILLERS for token in tokens)
+
+
+# "कन्फर्म" as Whisper writes it on phone audio: CONFIRM, conform, kanfum and,
+# in live calls 2026-11-20/21, "GUNFORM" and "PANFAM".
+_CONFIRM_LIKE = re.compile(r"^[bcgkps]?h?[aeiou]{1,2}nf(?:[aeiou]{1,2})r?m(?:ed|d)?$")
+_CONFIRM_FILLERS = {
+    "karo", "kar", "kardo", "do", "dijiye", "please", "order", "ji", "जी", "हाँ",
+    "हां", "haan", "han", "yes", "ok", "okay", "it", "the", "करो", "कर", "दो",
+    "ऑर्डर", "दीजिए", "karu", "karun", "karoon", "kru", "kro",
+}
+
+
+def sounds_like_confirm(text: str) -> bool:
+    """A short reply that sounds like "confirm" (asked for right before)."""
+    tokens = [fold_latin(token) for token in normalize_text(text).split()]
+    if not tokens or len(tokens) > 3:
+        return False
+    if not any(_CONFIRM_LIKE.match(token) or token in {"कन्फर्म", "कंफर्म", "कनफर्म"} for token in tokens):
+        return False
+    return all(
+        _CONFIRM_LIKE.match(token) or token in _CONFIRM_FILLERS or token in {"कन्फर्म", "कंफर्म", "कनफर्म"}
+        for token in tokens
+    )

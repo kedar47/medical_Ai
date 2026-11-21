@@ -993,3 +993,23 @@ def test_kokoro_reuses_audio_for_repeated_text(monkeypatch):
     adapter.synthesize("Please say the quantity.", language="hi")
     assert first is second
     assert len(calls) == 2
+
+
+
+def test_long_speech_heard_as_nothing_asks_to_repeat(db_session, seed_catalogue):
+    # The client's call 2026-11-21: ~11 s of speech, STT found nothing, and the
+    # caller heard silence. Six seconds or more now gets "please repeat".
+    from app.core.exceptions import NoSpeechError
+
+    class DeafSTT(STT):
+        def transcribe(self, audio_bytes, **kwargs):
+            raise NoSpeechError(400, "No speech was detected in the audio. Please try again.")
+
+    voice = VoiceService(db_session, stt=DeafSTT(), tts=TTS())
+    service = CallManager(db_session, voice)
+    call = service.incoming("mock", "deaf")
+    service.claim(call.call_id, "stream")
+    reply = service.process(call.call_id, bytes(7 * 16000), threading.Event(), False)
+    assert reply is not None and "साफ़ सुनाई नहीं दिया" in reply.assistant_text
+    assert reply.status.value == "ACTIVE"
+    assert service.process(call.call_id, bytes(16000), threading.Event(), False) is None

@@ -464,3 +464,66 @@ def test_live_call_21_17_replayed(client, demo_catalogue):
     assert after_dolo["assistant_text"].endswith("अब BRUFEN 200MG की कितनी स्ट्रिप चाहिए?")
     final = say(client, voice, "DO")
     assert sorted(cart(final)) == [("MED-00013", 2, "STRIP"), ("MED-00025", 2, "STRIP")]
+
+
+# ---- calls 2026-11-20 21:27, 2026-11-21 04:18 and the client's at 18:35 -------
+
+@pytest.mark.parametrize("heard", ["GUNFORM", "PANFAM", "kanfum", "CONFIRM KARU", "conform karo"])
+def test_misheard_confirm_after_read_back_places_the_order(client, demo_catalogue, heard):
+    voice = session(client)
+    say(client, voice, "dolo")
+    say(client, voice, "2")
+    summary = say(client, voice, "confirm karo")
+    assert "कन्फर्म" in summary["assistant_text"]
+    confirmed = say(client, voice, heard)
+    assert confirmed["order"] is not None
+    assert [i["medicine_id"] for i in confirmed["order"]["line_items"]] == ["MED-00025"]
+
+
+def test_confirm_like_word_before_the_read_back_does_not_confirm(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "dolo")
+    say(client, voice, "2")
+    result = say(client, voice, "GUNFORM")
+    assert result["order"] is None
+
+
+def test_do_a_strip_is_two_strips(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "dolo")
+    assert cart(say(client, voice, "DO A STRIP")) == [("MED-00025", 2, "STRIP")]
+
+
+def test_first_or_second_answers_which_medicine(client, demo_catalogue):
+    voice = session(client)
+    say(client, voice, "brufan dolo 650.")
+    picked = say(client, voice, "PAHEL DALO")
+    assert picked["assistant_text"] == "BRUFEN 200MG चाहिए, 400MG या 600MG?"
+    voice = session(client)
+    say(client, voice, "brufan dolo 650.")
+    assert say(client, voice, "दूसरा")["assistant_text"] == "DOLO 650MG की कितनी स्ट्रिप चाहिए?"
+
+
+def test_not_found_gives_examples(client, demo_catalogue):
+    result = say(client, session(client), "COSPIN ADVICATE TURGAIT NINTAKTAR")
+    assert "डोलो 650" in result["assistant_text"]
+
+
+def test_greeting_gives_examples(client, demo_catalogue):
+    assert "डोलो 650" in session(client)["message"]
+
+
+def test_live_call_04_18_replayed(client, demo_catalogue):
+    voice = session(client)
+    for text in ["ccomprofen", "brufan dolo650", "650."]:
+        say(client, voice, text)
+    assert cart(say(client, voice, "DO A STRIP")) == [("MED-00025", 2, "STRIP")]
+    say(client, voice, "confirm karo")
+    assert say(client, voice, "GUNFORM")["order"] is not None
+
+
+def test_live_call_21_27_replayed(client, demo_catalogue):
+    voice = session(client)
+    for text in ["brufan dolo 650.", "brufan dolo 650.", "PAHEL DALO", "dolo650 brufan 200", "dolo650", "DO STRIP", "CONFIRM KARU"]:
+        say(client, voice, text)
+    assert say(client, voice, "PANFAM")["order"] is not None

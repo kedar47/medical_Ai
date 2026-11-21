@@ -1,5 +1,6 @@
 import hashlib
 import io
+from types import SimpleNamespace
 import logging
 import time
 import unicodedata
@@ -309,6 +310,19 @@ class CallManager:
             call = self.get(call_id)
             call.status = previous_status
             self.db.commit()
+            if len(pcm) >= 6 * 16000:
+                # Live call (the client, 2026-11-21): ~11 s of speech came back
+                # as nothing and the caller heard silence. Six seconds of
+                # sound is a caller talking, not a cough: ask them to repeat.
+                return SimpleNamespace(
+                    status=SimpleNamespace(value="ACTIVE"),
+                    assistant_text=(
+                        "माफ़ कीजिए, साफ़ सुनाई नहीं दिया। कृपया दवा का नाम दोबारा बताइए, जैसे डोलो 650।"
+                        if speech_language != "en"
+                        else "Sorry, I could not hear that clearly. Please say the medicine name again, for example Dolo 650."
+                    ),
+                    language=speech_language,
+                )
             return None
         stt_ms = int((time.perf_counter() - stt_started) * 1000)
         logger.info(

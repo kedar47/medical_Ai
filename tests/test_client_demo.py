@@ -41,7 +41,7 @@ def test_catalogue_is_the_clients_list_only():
 
     rows = list(csv.DictReader(CSV.open(encoding="utf-8")))
     names = {r["medicine_name"] for r in rows}
-    assert len(names) == 26  # 20 picked + 6 from the client's own sample calls
+    assert len(names) == 28  # 20 picked + 6 from his sample calls + 2 from his test calls
     assert "CROCIN" not in names and "CETIRIZINE" not in names
 
 
@@ -230,3 +230,39 @@ def test_near_name_is_asked_yes_no(client, client_catalogue):
     asked = say(client, voice, "Pantha said, three strips please.")
     assert asked["assistant_text"] == "Do you want 3 strips of PANTOCID TAB? Please say yes or no."
     assert cart(say(client, voice, "yes")) == [("MED-105058", 3, "STRIP")]
+
+
+# ---- the client's test calls, 2026-11-22 -------------------------------------
+
+def test_list_with_medicines_outside_the_demo(client, client_catalogue):
+    result = say(client, session(client), (
+        "Rapid D ke do patte, Sumo Cold ke do patte, Texon OF ke teen patte, GTM XL ki do bottle."
+    ))
+    text = result["assistant_text"]
+    assert "RAPID D हमारी लिस्ट में नहीं मिली" in text and "GTM XL हमारी लिस्ट में नहीं मिली" in text
+    assert cart(result) == [("MED-100569", 2, "STRIP"), ("MED-100577", 3, "STRIP")]
+
+
+def test_list_said_during_a_question_and_bas_finishes(client, client_catalogue):
+    voice = session(client)
+    asked = say(client, voice, "मेक्स्टापी की दो बॉटल")
+    assert asked["assistant_text"] == "MAXTRA P DS SYRUP चाहिए या SYRUP?"
+    listed = say(client, voice, "शिरोम पाँच सौ के तीन पत्ते, वेलेंटास फिफ्टी के दो पत्ते, बीका शूल के तीन पत्ते।")
+    assert cart(listed) == [("MED-00016", 3, "STRIP"), ("MED-105837", 2, "STRIP"), ("MED-106842", 3, "BOTTLE")]
+    say(client, voice, "Maxtrapi syrup")
+    readback = say(client, voice, "बस")
+    assert "सही हो तो कन्फर्म कहें" in readback["assistant_text"]
+    assert say(client, voice, "कन्फर्म")["status"] == "CONFIRMED"
+
+
+def test_other_script_asks_to_repeat_and_late_name_is_saved(client, client_catalogue, db_session):
+    voice = session(client)
+    assert say(client, voice, "ਹਾਂ।")["assistant_text"].startswith("माफ़ कीजिए, साफ़ सुनाई नहीं दिया।")
+    say(client, voice, "Brufen 400")
+    assert say(client, voice, "Hello")["assistant_text"] == "BRUFEN 400MG की कितनी स्ट्रिप चाहिए?"
+    named = say(client, voice, "मेरा नाम नितिन प्रजापति है।")
+    assert named["assistant_text"].startswith("धन्यवाद नितिन प्रजापति जी। BRUFEN 400MG")
+    say(client, voice, "दो")
+    say(client, voice, "बस")
+    say(client, voice, "हाँ")
+    assert db_session.query(Order).one().customer_name == "नितिन प्रजापति"

@@ -423,7 +423,8 @@ def test_kept_medicine_can_be_refused(client, demo_catalogue):
     for text in ["ब्रूफेन", "पहला", "DOLO 650.", "2"]:
         say(client, voice, text)
     refused = say(client, voice, "नहीं")
-    assert refused["assistant_text"] == "ठीक है, वह दवा नहीं जोड़ी। कौन सी दवा चाहिए?"
+    # The order already has DOLO 650: offer to finish as well.
+    assert refused["assistant_text"] == "ठीक है, वह दवा नहीं जोड़ी। और कोई दवा चाहिए, या ऑर्डर कन्फर्म करूँ?"
     summary = say(client, voice, "order batao")
     assert [i["medicine_id"] for i in summary["order_summary"]["items"]] == ["MED-00025"]
 

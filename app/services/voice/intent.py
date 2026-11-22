@@ -1271,9 +1271,23 @@ _NOT_A_NAME = {
 }
 
 
-def is_only_greeting(text: str) -> bool:
+def is_only_fillers(text: str) -> bool:
+    """"हेलो" / "हाँ जी": nothing but greeting or filler words."""
     tokens = [fold_latin(token) for token in normalize_text(text).split()]
     return bool(tokens) and all(token in _NAME_FILLERS for token in tokens)
+
+
+_GREETING_WORDS = {"hello", "हेलो", "हैलो", "hallo", "hi", "हाय", "नमस्ते", "namaste", "namaskar", "नमस्कार"}
+
+
+def is_only_greeting(text: str) -> bool:
+    """"हेलो" / "नमस्ते जी": a greeting and nothing else. "हाँ जी" is a yes."""
+    tokens = [fold_latin(token) for token in normalize_text(text).split()]
+    return (
+        bool(tokens)
+        and any(token in _GREETING_WORDS for token in tokens)
+        and all(token in _NAME_FILLERS and token not in _AFFIRMATIVE_WORDS for token in tokens)
+    )
 
 
 def extract_caller_name(text: str) -> str | None:
@@ -1291,6 +1305,8 @@ def extract_caller_name(text: str) -> str | None:
     name = [t for t, f in zip(tokens, folded) if f not in _NAME_FILLERS]
     if not name or len(name) > 6:
         return None
+    if not all(re.fullmatch(r"[A-Za-z.'-]+|[\u0900-\u097F]+", part) for part in name):
+        return None  # "ਹਾਂ" (Gurmukhi) from a mis-detected language
     return " ".join(part if not part.isascii() else part.capitalize() for part in name)
 
 STRENGTH_ONLY_WORDS = {

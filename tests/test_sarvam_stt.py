@@ -104,3 +104,18 @@ def test_build_stt_uses_sarvam_only_with_a_key():
         assert not isinstance(build_stt(no_key), SarvamSTT)
     finally:
         reset_shared_engines()
+
+
+def test_other_language_guess_is_retried_as_hindi():
+    calls = []
+
+    def handler(request):
+        body = request.content
+        calls.append(b"hi-IN" in body)
+        if b"hi-IN" in body:
+            return httpx.Response(200, json={"transcript": "हाँ", "language_code": "hi-IN"})
+        return httpx.Response(200, json={"transcript": "ਹਾਂ", "language_code": "pa-IN"})
+
+    stt, _ = adapter(handler)
+    assert stt.transcribe(b"x", filename="a.wav").transcript == "हाँ"
+    assert calls == [False, True]

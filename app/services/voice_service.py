@@ -66,6 +66,7 @@ from app.services.voice.intent import (
     is_nothing_more,
     extract_caller_name,
     is_only_greeting,
+    is_only_fillers,
     sounds_like_confirm,
     normalize_spoken_strengths,
     split_spoken_hundreds,
@@ -593,7 +594,7 @@ class VoiceService:
             for part in parts
         ]
         counted = all(extract_quantity_unit(part)[0] is not None for part in parts)
-        if counted and any(named):
+        if counted:
             # The client's sample call: "वेलेंटास 100 के 20 पत्ते, वेलेंटास
             # 200 के 20 पत्ते, नेबी स्टार 5 के 50 पत्ते, ...". Each counted
             # item is taken in turn; one not in the list is said so.
@@ -692,6 +693,43 @@ class VoiceService:
             values |= {v for v in attributes_from_candidate(candidate).strengths if v.isdigit()}
         return values
 
+    _NAME_MARKER = re.compile(r"(?<!\S)(?:नाम|naam|name)(?!\S)", re.IGNORECASE)
+
+    def _explicit_name(self, voice, state, text: str, language: str) -> TurnDraft | None:
+        """"मेरा नाम नितिन प्रजापति है" at any point: save (or correct) the name."""
+        if voice.status != ACTIVE or not self._NAME_MARKER.search(text):
+            return None
+        if self.matching.suggestions_from_utterance(text):
+            return None
+        name = extract_caller_name(text)
+        if name is None:
+            return None
+        voice.order_session.customer_name = name[:255]
+        state.name_asks = 2
+        logger.info("voice.customer_name.saved chars=%s explicit=1", len(name))
+        if state.pending is not None:
+            follow = self._pending_question(state.pending, language)
+        elif voice.order_session.items:
+            follow = _text("और कोई दवा चाहिए, या ऑर्डर कन्फर्म करूँ?", "Anything else, or shall I confirm the order?", language)
+        else:
+            follow = _text("कौन सी दवा चाहिए, और कितनी? जैसे डोलो 650 दो पत्ते।", "Which medicine do you want, and how many?", language)
+        return TurnDraft(
+            intent=VoiceIntent.UNKNOWN,
+            language=language,
+            assistant_text=_text(f"धन्यवाद {name} जी। ", f"Thank you, {name}. ", language) + follow,
+        )
+
+    def _pending_question(self, pending, language: str) -> str:
+        if pending.kind == "candidate":
+            return self._candidate_retry_prompt(pending, language)
+        candidate = MedicineMatchCandidate(
+            medicine_id=pending.medicine_id,
+            medicine_name=pending.medicine_name or "",
+            description=pending.description or "",
+            match_type="EXACT_NAME",
+        )
+        return self._quantity_prompt(candidate, pending.quantity, pending.unit, language)
+
     def _maybe_take_name(self, voice, state, text: str, language: str) -> TurnDraft | None:
         """The greeting asks for the caller's name; it is saved with the order.
 
@@ -711,7 +749,7 @@ class VoiceService:
         if self.matching.suggestions_from_utterance(text):
             return None
         parsed = self._parse_intent(text, language, None)
-        if parsed.intent not in (VoiceIntent.UNKNOWN, VoiceIntent.ADD_ITEM) and not is_only_greeting(text):
+        if parsed.intent not in (VoiceIntent.UNKNOWN, VoiceIntent.ADD_ITEM) and not is_only_fillers(text):
             return None
         name = extract_caller_name(text)
         if name is not None and parsed.medicine_query:
@@ -721,7 +759,7 @@ class VoiceService:
         if name is None:
             # Only "हेलो" / "हाँ जी" (nothing but greeting words) asks again;
             # anything else is handled as an order request.
-            if not is_only_greeting(text):
+            if not is_only_fillers(text):
                 return None
             state.name_asks += 1
             if state.name_asks >= 2:
@@ -775,12 +813,36 @@ class VoiceService:
     ) -> TurnDraft:
         if parsed is None:
             text = self._normalize_heard(text)
-            named = self._maybe_take_name(voice, state, text, language)
+            named = self._maybe_take_name(voice, state, text, language) or self._explicit_name(
+                voice, state, text, language
+            )
             if named is not None:
                 return named
-        if parsed is None and state.pending is None and voice.status == ACTIVE:
+            letters = [ch for ch in text if ch.isalpha()]
+            if letters and sum(1 for ch in letters if ch.isascii() or "\u0900" <= ch <= "\u097f") < len(letters) / 2:
+                follow = (
+                    self._pending_question(state.pending, language) if state.pending is not None
+                    else _text("कृपया दवा का नाम दोबारा बताइए, जैसे डोलो 650 दो पत्ते।", "Please say the medicine again, for example two strips of Dolo 650.", language)
+                )
+                return TurnDraft(
+                    intent=VoiceIntent.UNKNOWN,
+                    language=language,
+                    assistant_text=_text("माफ़ कीजिए, साफ़ सुनाई नहीं दिया। ", "Sorry, I could not hear that clearly. ", language) + follow,
+                )
+            if state.pending is not None and is_only_greeting(text):
+                # Live call: "Hello" while a quantity was asked got the help
+                # text. Repeat the question instead.
+                return TurnDraft(
+                    intent=VoiceIntent.SELECT_CANDIDATE,
+                    language=language,
+                    assistant_text=self._pending_question(state.pending, language),
+                )
+        if parsed is None and voice.status == ACTIVE:
             parts = self._split_medicines(text)
             if parts:
+                # Live call (the client): a whole list said while the AI was
+                # asking about MAXTRA P was refused as "unclear quantity".
+                state.pending = None
                 state.queued = parts[1:]
                 text = parts[0]
         in_list = bool(state.queued)
@@ -808,7 +870,7 @@ class VoiceService:
         if said or in_list:
             if state.pending is None and not state.queued and len(voice.order_session.items) == before:
                 # The last item of a list was not found: say so briefly.
-                draft = replace(draft, assistant_text=self._list_brief(draft, text, before, voice, language) + " " + _text(
+                draft = replace(draft, order_summary=self._safe_summary(self.orders.get_summary(voice.order_session.session_id), language) if voice.order_session.items else None, assistant_text=self._list_brief(draft, text, before, voice, language) + " " + _text(
                     "और कोई दवा चाहिए, या ऑर्डर कन्फर्म करूँ?",
                     "Anything else, or shall I confirm the order?",
                     language,
@@ -854,6 +916,7 @@ class VoiceService:
         if "लिस्ट में नहीं है" in draft.assistant_text or "is not in our list" in draft.assistant_text:
             return draft.assistant_text
         heard = (self._parse_intent(part, language, None).medicine_query or part).strip()
+        heard = heard.upper() if heard.isascii() else heard
         return _text(f"{heard} हमारी लिस्ट में नहीं मिली।", f"{heard} is not in our list.", language)
 
     def _handle_text(
@@ -868,6 +931,22 @@ class VoiceService:
         if parsed is None:
             parsed = self._parse_intent(text, language, state.pending)
 
+        if (
+            state.pending is not None
+            and voice.order_session.items
+            and is_nothing_more(text)
+            and not is_plain_negative(text)
+        ):
+            # Live call: "बस" while MAXTRA P's variant was asked repeated the
+            # question. The caller is done: drop that item, read the order.
+            state.pending = None
+            state.deferred = []
+            state.queued = []
+            draft = self._show_summary(voice, state, language)
+            return replace(draft, assistant_text=_text(
+                "ठीक है, वह दवा नहीं जोड़ी। ", "Okay, I did not add it. ", language,
+            ) + draft.assistant_text)
+
         if state.pending is not None and is_plain_negative(text):
             # "नहीं" to "BRUFEN 200MG चाहिए या 400MG?" or to a quantity
             # question drops that item only; the order stays as it is.
@@ -880,6 +959,19 @@ class VoiceService:
                     assistant_text=_text(
                         "ठीक है, वह दवा नहीं जोड़ी। अब " + self._deferred_question(resumed, "hi"),
                         "Okay, I did not add it. Next: " + self._deferred_question(resumed, "en"),
+                        language,
+                    ),
+                )
+            if state.queued:
+                return TurnDraft(intent=VoiceIntent.ADD_ITEM, language=language,
+                                 assistant_text=_text("ठीक है, वह दवा नहीं जोड़ी।", "Okay, I did not add it.", language))
+            if voice.order_session.items:
+                return TurnDraft(
+                    intent=VoiceIntent.ADD_ITEM,
+                    language=language,
+                    assistant_text=_text(
+                        "ठीक है, वह दवा नहीं जोड़ी। और कोई दवा चाहिए, या ऑर्डर कन्फर्म करूँ?",
+                        "Okay, I did not add it. Anything else, or shall I confirm the order?",
                         language,
                     ),
                 )
@@ -1179,6 +1271,8 @@ class VoiceService:
                 fitting = [c for c in result.candidates if strictly_matches(c, spoken_form)]
                 if 1 < len(fitting) < len(result.candidates):
                     result = result.model_copy(update={"candidates": fitting})
+            if not spoken_form.strengths:
+                result = result.model_copy(update={"candidates": self._narrow_by_pack(result.candidates, unit)})
             state.pending = VoicePendingState(
                 kind="candidate",
                 candidates=result.candidates,
@@ -1219,6 +1313,13 @@ class VoiceService:
                 )
             if name_heard and spoken.formulations and not spoken.strengths and 1 < len(strict_candidates) < len(result.candidates):
                 result = result.model_copy(update={"candidates": strict_candidates})
+            if name_heard and not spoken.strengths and len(result.candidates) > 1:
+                narrowed_packs = self._narrow_by_pack(result.candidates, unit)
+                if len(narrowed_packs) == 1:
+                    self._log_matching("add_fuzzy", text, result.candidates, narrowed_packs[0], "STRICT_MATCH")
+                    return self._add_candidate(voice, state, narrowed_packs[0], quantity, unit, language)
+                result = result.model_copy(update={"candidates": narrowed_packs})
+                strict_candidates = [c for c in strict_candidates if c in narrowed_packs] or strict_candidates
             if name_heard and len(result.candidates) > 1:
                 one = self._select_variant_by_words(strict_candidates, text, unit)
                 if one is not None:
@@ -1272,6 +1373,10 @@ class VoiceService:
                 if len(narrowed) > 1:
                     one = self._select_variant_by_words(narrowed, text, unit)
                     narrowed = [one] if one is not None else narrowed
+                if len(narrowed) > 1 and unit in (OrderUnit.STRIP, OrderUnit.TABLET, OrderUnit.BOTTLE):
+                    wanted = OrderUnit.BOTTLE if unit == OrderUnit.BOTTLE else OrderUnit.STRIP
+                    packs = [c for c in narrowed if default_unit_for(c.description) == wanted]
+                    narrowed = packs or narrowed
                 if len(narrowed) == 1:
                     self._log_matching("add_fuzzy", text, result.candidates, None, "STRENGTH_GUESS")
                     state.pending = VoicePendingState(
@@ -1732,6 +1837,15 @@ class VoiceService:
             if len(packs) == 1:
                 return packs[0]
         return None
+
+    @staticmethod
+    def _narrow_by_pack(candidates, unit):
+        """"दो बॉटल" asks only between the liquids, "दो पत्ते" between tablets."""
+        if unit not in (OrderUnit.STRIP, OrderUnit.TABLET, OrderUnit.BOTTLE) or len(candidates) < 2:
+            return candidates
+        wanted = OrderUnit.BOTTLE if unit == OrderUnit.BOTTLE else OrderUnit.STRIP
+        packs = [c for c in candidates if default_unit_for(c.description) == wanted]
+        return packs or candidates
 
     def _select_candidate_by_form(self, candidates, text):
         """"गोली वाली" / "syrup" / "injection" between a tablet and a liquid."""

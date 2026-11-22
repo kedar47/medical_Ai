@@ -58,6 +58,16 @@ class SarvamSTT:
             )
 
     def _sarvam(self, audio_bytes: bytes, filename: str) -> TranscriptionResult:
+        result, code = self._request(audio_bytes, filename, self.settings.sarvam_stt_language)
+        if code not in {"hi", "en"} and self.settings.sarvam_stt_language == "unknown":
+            # Live call: "हाँ" / "ठीक है" came back in Punjabi script ("ਹਾਂ")
+            # when Sarvam guessed the language. Callers speak Hindi or
+            # English: ask again in Hindi.
+            logger.info("voice.stt.sarvam_language_retry detected=%s", code or "-")
+            result, _ = self._request(audio_bytes, filename, "hi-IN")
+        return result
+
+    def _request(self, audio_bytes: bytes, filename: str, language_code: str):
         content_type = "audio/wav" if filename.lower().endswith(".wav") else "application/octet-stream"
         response = self._client.post(
             SARVAM_STT_URL,
@@ -67,7 +77,7 @@ class SarvamSTT:
                 "model": self.settings.sarvam_stt_model,
                 # "unknown": Sarvam detects Hindi or English itself, so English
                 # speech comes back in English letters, Hindi in Devanagari.
-                "language_code": self.settings.sarvam_stt_language,
+                "language_code": language_code,
             },
         )
         response.raise_for_status()
@@ -81,4 +91,4 @@ class SarvamSTT:
             language=code if code in {"hi", "en"} else "hi",
             language_probability=None,
             duration_seconds=None,
-        )
+        ), code

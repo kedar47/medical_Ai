@@ -84,4 +84,14 @@ DEFAULT_MEDICINE_ALIASES: dict[str, str] = {
     "मैक्स्ट्रा पी": "MAXTRA-P", "मैक्सट्रा पी": "MAXTRA-P", "मैक्स्ट्रा-पी": "MAXTRA-P", "maxtra p": "MAXTRA-P",
     # "दो स्ट्रिप बुफेन 400 चाहिए" (live call 2026-11-22).
     "बुफेन": "BRUFEN", "बुफ़ेन": "BRUFEN", "bufen": "BRUFEN",
+    # The client's test calls, 2026-11-22.
+    "मेक्स्टापी": "MAXTRA-P", "मैक्स्टापी": "MAXTRA-P", "मैक्सटापी": "MAXTRA-P", "मेक्सट्रापी": "MAXTRA-P",
+    "मैक्स्ट्रापी": "MAXTRA-P", "maxtrapi": "MAXTRA-P", "maxtra pi": "MAXTRA-P", "maxtrap": "MAXTRA-P",
+    "शिरोम": "CEROM 500", "सिरोम": "CEROM 500", "शेरोम": "CEROM 500", "cirom": "CEROM 500", "sirom": "CEROM 500",
+    "बीका शूल": "BECOSULES", "बीकाशूल": "BECOSULES", "बिकाशूल": "BECOSULES", "बीकोशूल": "BECOSULES",
+    "बिकोसूल": "BECOSULES", "bikashul": "BECOSULES",
+    "क्रीमाफिन": "CREMAFFIN", "क्रीमाफिन प्लस": "CREMAFFIN",
+    "सुमो कोल्ड": "SUMO COLD", "सूमो कोल्ड": "SUMO COLD", "sumo cold": "SUMO COLD", "sumocold": "SUMO COLD",
+    "टैक्सिम ओएफ": "TAXIM-OF", "टेक्सिम ओएफ": "TAXIM-OF", "टैक्सिम ओ एफ": "TAXIM-OF", "टेक्सॉन ओएफ": "TAXIM-OF",
+    "taxim of": "TAXIM-OF", "texon of": "TAXIM-OF", "taxim o f": "TAXIM-OF", "texim of": "TAXIM-OF",
 }

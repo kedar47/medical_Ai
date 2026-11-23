@@ -39,6 +39,18 @@ from app.services.telephony.speech import speech_parts
 
 router = APIRouter(prefix="/telephony", tags=["telephony"])
 logger = logging.getLogger(__name__)
+# Replies that only ask the caller to try again. When the caller has already
+# said something newer, such a reply is stale and is not played.
+_RETRY_MARKERS = (
+    "हमारी लिस्ट में नहीं मिली", "लिस्ट में नहीं मिली", "मात्रा स्पष्ट नहीं", "समझ नहीं पाया",
+    "साफ़ सुनाई नहीं", "not in our list", "did not understand", "could not hear", "not clear",
+)
+_ORDER_CHANGED_MARKERS = ("जोड़ दी", "Added", "बदल दी", "हटा दिया", "Removed", "कन्फर्म हो गया", "confirmed")
+
+
+def is_retry_reply(text: str) -> bool:
+    return any(m in text for m in _RETRY_MARKERS) and not any(m in text for m in _ORDER_CHANGED_MARKERS)
+
 BARGE_IN_SPEECH_BYTES = 4 * FRAME_BYTES
 # This CPU demo intentionally accepts one media call per API process.
 CALL_SLOT = threading.BoundedSemaphore(1)
@@ -390,6 +402,13 @@ async def handle_media(ws: WebSocket, factory):
                                 current, generation)
                     cancel_playback("new_turn", caller_turn_bytes=len(pcm))
                     await asyncio.to_thread(run, "invalidate_summary", call_id)
+                    continue
+                if not terminal_reply and not queue.empty() and is_retry_reply(turn.assistant_text):
+                    # Live call (the client, 2026-11-22): he kept talking while
+                    # three "not in our list" replies played back to back. A
+                    # newer turn is waiting: answer that one instead. Replies
+                    # that add or change the order are always played.
+                    logger.info("telephony.reply.skipped reason=newer_turn_waiting queue_size=%s", queue.qsize())
                     continue
                 barge_in_voiced_bytes = 0
                 playback = asyncio.create_task(play(speak_ahead(turn.assistant_text, turn.language),

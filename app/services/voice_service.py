@@ -397,6 +397,7 @@ class VoiceService:
         draft = self._handle_utterance(
             voice, state, payload.text, language, parsed=parsed
         )
+        draft = self._shorten_repeat(state, draft, language)
         voice.turn_count += 1
         voice.last_intent = draft.intent.value
         voice.state_json = state.model_dump_json()
@@ -729,6 +730,25 @@ class VoiceService:
             match_type="EXACT_NAME",
         )
         return self._quantity_prompt(candidate, pending.quantity, pending.unit, language)
+
+    def _shorten_repeat(self, state, draft: TurnDraft, language: str) -> TurnDraft:
+        """The same "not found" / "unclear quantity" twice in a row: say it short.
+
+        Live call (the client, 2026-11-22): the full "यह दवा हमारी लिस्ट में
+        नहीं मिली। कृपया दवा का नाम दोबारा बताइए, जैसे डोलो 650 या ब्रूफेन
+        400।" was said three times in a row.
+        """
+        text = draft.assistant_text
+        short = None
+        if text == state.last_reply:
+            if text == not_found_text(language):
+                short = _text("यह भी लिस्ट में नहीं मिली। कोई और दवा बताइए।",
+                              "That is not in our list either. Please say another medicine.", language)
+            elif text == self._repeat_quantity_text(language):
+                short = _text("कृपया सिर्फ़ एक मात्रा बताइए, जैसे दो पत्ते।",
+                              "Please say just one quantity, for example two strips.", language)
+        state.last_reply = text
+        return replace(draft, assistant_text=short) if short else draft
 
     def _maybe_take_name(self, voice, state, text: str, language: str) -> TurnDraft | None:
         """The greeting asks for the caller's name; it is saved with the order.

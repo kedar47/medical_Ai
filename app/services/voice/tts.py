@@ -1,4 +1,5 @@
 import io
+import logging
 import threading
 import wave
 from collections import OrderedDict
@@ -7,6 +8,22 @@ from pathlib import Path
 from app.core.config import Settings
 from app.core.exceptions import VoiceError
 from app.services.voice.types import SynthesizedAudio
+
+logger = logging.getLogger(__name__)
+
+# Words espeak spells out letter by letter in a Hindi reply ("TAB" -> "टी ए
+# बी"), said the way a pharmacist says them.
+_HINDI_SPOKEN = {"TAB": "टैबलेट", "TABS": "टैबलेट", "MAXTRA": "मैक्स्ट्रा"}
+
+
+def _hindi_speakable(text: str) -> str:
+    import re
+
+    return re.sub(
+        r"(?<![A-Za-z])[A-Z]+(?![A-Za-z])",
+        lambda m: _HINDI_SPOKEN.get(m.group(0), m.group(0)),
+        text,
+    )
 
 
 class KokoroTextToSpeech:
@@ -65,6 +82,34 @@ class KokoroTextToSpeech:
                 ) from exc
         return self._engine
 
+    @staticmethod
+    def _phonemes(engine, text: str, lang: str) -> str | None:
+        """Phonemes without espeak's language-switch flags.
+
+        Kokoro's own phonemizer keeps them: "BRUFEN" in a Hindi reply becomes
+        "(en)bɹˈuːfən(hi)", and the model reads the flags aloud. A live call
+        (the client, 2026-11-22) heard "एन ब्रुफन ही" for every English word.
+        Removing the flags keeps the English pronunciation of the name.
+        None falls back to Kokoro's own path.
+        """
+        try:
+            import phonemizer
+            from kokoro_onnx import tokenizer as kokoro_tokenizer
+
+            with kokoro_tokenizer._espeak_lock:
+                raw = phonemizer.phonemize(
+                    text,
+                    lang,
+                    preserve_punctuation=True,
+                    with_stress=True,
+                    language_switch="remove-flags",
+                )
+            vocab = engine.tokenizer.vocab
+            return "".join(p for p in raw if p in vocab).strip() or None
+        except Exception:
+            logger.warning("voice.tts.phonemes_fallback", exc_info=True)
+            return None
+
     def synthesize(self, text: str, *, language: str) -> SynthesizedAudio:
         engine = self._get_engine()
         # Catalogue descriptions contain alignment padding. Collapsing whitespace
@@ -76,6 +121,8 @@ class KokoroTextToSpeech:
             else self.settings.voice_tts_voice_en
         )
         kokoro_language = "hi" if language == "hi" else "en-us"
+        if kokoro_language == "hi":
+            text = _hindi_speakable(text)
         key = (text, voice, self.settings.voice_tts_speed, kokoro_language)
         with self._lock:
             cached = self._cache.get(key)
@@ -83,12 +130,14 @@ class KokoroTextToSpeech:
                 self._cache.move_to_end(key)
                 return cached
         try:
+            phonemes = self._phonemes(engine, text, kokoro_language)
             with self._lock:
                 samples, sample_rate = engine.create(
-                    text,
+                    phonemes if phonemes else text,
                     voice=voice,
                     speed=self.settings.voice_tts_speed,
                     lang=kokoro_language,
+                    is_phonemes=bool(phonemes),
                 )
         except Exception as exc:
             raise VoiceError(

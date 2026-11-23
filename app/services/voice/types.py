@@ -53,6 +53,8 @@ class VoiceState(BaseModel):
     queued: list[str] = Field(default_factory=list)
     # Times the caller was asked for their name (asked in the greeting).
     name_asks: int = 0
+    # The previous reply, to keep a repeated "not found" short.
+    last_reply: str = ""
 
 
 class ParsedIntent(BaseModel):

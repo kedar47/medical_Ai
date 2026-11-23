@@ -239,13 +239,9 @@ def test_voice_fuzzy_suggestions_reject_ordinal_and_accept_medicine_id(
         for candidate in first["candidates"]
     )
 
-    rejected = turn(client, session["voice_session_id"], "first")
-    assert rejected["order_summary"] is None
-    assert "medicine ID" in rejected["assistant_text"]
-
-    accepted = turn(client, session["voice_session_id"], "MED-00014")
-    assert accepted["order_summary"]["line_item_count"] == 1
-    assert accepted["order_summary"]["items"][0]["medicine_id"] == "MED-00014"
+    # The question names BRUFEN's own variants, so "first" is a clear choice.
+    accepted = turn(client, session["voice_session_id"], "first")
+    assert [i["medicine_id"] for i in accepted["order_summary"]["items"]] == ["MED-00013"]
 
 
 def test_voice_updates_and_removes_last_item(

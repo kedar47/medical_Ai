@@ -51,4 +51,5 @@ def test_repeated_not_found_is_short(client, db_session):
 
     first = say("जी थी एम एक्सेल की दो बाटल")
     assert "जैसे डोलो 650" in first
-    assert say("जी थी एम एक्सेल की दो बाटल") == "यह भी लिस्ट में नहीं मिली। कोई और दवा बताइए।"
+    again = say("जी थी एम एक्सेल की दो बाटल")
+    assert again.startswith("यह भी लिस्ट में नहीं मिली।") and "धीरे-धीरे" in again and "छोड़ दो" in again

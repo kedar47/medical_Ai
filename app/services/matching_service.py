@@ -1,3 +1,4 @@
+import re
 import unicodedata
 
 from rapidfuzz import fuzz
@@ -121,7 +122,32 @@ def transliterate_text(value: str) -> str:
     return " ".join("".join(output).split())
 
 
+_PHONETIC_RULES = (
+    (re.compile(r"ph"), "f"), (re.compile(r"c(?=[eiy])"), "s"), (re.compile(r"[cqk]+"), "k"),
+    (re.compile(r"z"), "j"), (re.compile(r"w"), "v"), (re.compile(r"(?<=[a-z])h"), ""),
+    (re.compile(r"[aeiouy]+"), ""), (re.compile(r"([a-z])\1+"), r"\1"),
+)
+
+
+def phonetic_key(value: str) -> str:
+    """"सेट्रिज़िन" and "cetirizine" both become "strjn"."""
+    key = normalize_text(transliterate_text(value))
+    for pattern, replacement in _PHONETIC_RULES:
+        key = pattern.sub(replacement, key)
+    return key
+
+
+_HUNDREDS = re.compile(r"(?<!\S)(एक|दो|तीन|चार|पांच|पाँच|छह|सात|आठ|नौ)\s+सौ(?!\S)")
+_HUNDRED_VALUES = {"एक": 1, "दो": 2, "तीन": 3, "चार": 4, "पांच": 5, "पाँच": 5, "छह": 6, "सात": 7, "आठ": 8, "नौ": 9}
+
+
+def _sound_ratio(a: str, b: str) -> int:
+    """Phone-line STT swaps l and n ("एनाफोटल" for ANAFORTAN)."""
+    return max(fuzz.ratio(a, b), fuzz.ratio(a.replace("l", "n"), b.replace("l", "n")))
+
+
 def _score_text(value: str, targets: set[str]) -> float:
+    value = _HUNDREDS.sub(lambda m: str(_HUNDRED_VALUES[m.group(1)] * 100), value)
     normalized = normalize_text(value)
     transliterated = normalize_text(transliterate_text(value))
     scores = [
@@ -130,6 +156,40 @@ def _score_text(value: str, targets: set[str]) -> float:
         for target in targets
         if probe and target
     ]
+    words = normalized.split()
+    for target in targets:
+        if not target:
+            continue
+        size = len(target.split())
+        # "आर्चीटोल स्ट्रिप": the name is compared with the same number of
+        # spoken words, so a leftover unit or filler word does not hide it.
+        spans = {normalized}
+        if not any(ch.isdigit() for ch in normalized) or any(ch.isdigit() for ch in target):
+            # A spoken strength is left to the strength rules, unless the
+            # catalogue name itself carries it ("CEROM 500").
+            spans |= {" ".join(words[i:i + size]) for i in range(len(words) - size + 1)}
+        key = phonetic_key(target)
+        letters = " ".join(w for w in target.split() if not any(ch.isdigit() for ch in w))
+        digits = {w for w in target.split() if w.isdigit()}
+        if letters and letters != target and digits and digits <= set(words):
+            # "सीरोम 500" for "CEROM 500": the name part sounds the same and the
+            # number said is the catalogue name's own number.
+            name_key = phonetic_key(letters)
+            size = len(letters.split())
+            for i in range(len(words) - size + 1):
+                sound = phonetic_key(" ".join(words[i:i + size]))
+                if len(sound.replace(" ", "")) >= 3:
+                    scores.append(0.9 * _sound_ratio(sound, name_key) / 100.0)
+                    if len(sound) >= 3 and sound[1:] == name_key[1:]:
+                        # "तेरोम 500" / "टेरॉम 500" for CEROM 500: only the first
+                        # sound differs and the catalogue name's own number was said.
+                        scores.append(0.8)
+        for span in spans:
+            sound = phonetic_key(span)
+            if len(sound.replace(" ", "")) >= 4:
+                weight = 0.95 if span == normalized else 0.9
+                # "कोम्बी फ्लेम" is COMBIFLAM said in two parts.
+                scores.append(weight * max(_sound_ratio(sound, key), _sound_ratio(sound.replace(" ", ""), key.replace(" ", ""))) / 100.0)
     return max(scores, default=0.0)
 
 
@@ -314,6 +374,10 @@ class MedicineMatchingService:
             entry for entry in self.score_candidates(text)
             if entry[1] >= self.settings.fuzzy_match_threshold
         ]
+        if scored:
+            # "कोम्बी फ्लेम" scores COMBIFLAM 0.95 and CORFLAM 0.74: a clear
+            # winner is not buried among weaker look-alikes.
+            scored = [entry for entry in scored if entry[1] >= scored[0][1] - 0.1]
         suggestions = [
             candidate
             for candidate, _ in scored[:self.settings.fuzzy_match_limit]

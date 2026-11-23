@@ -24,6 +24,9 @@ NUMBER_WORDS = {
     "चार": 4,
     "पांच": 5,
     "पाँच": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "chhe": 6, "che": 6, "saat": 7, "aath": 8, "nau": 9, "das": 10,
+    "छह": 6, "छः": 6, "छे": 6, "सात": 7, "आठ": 8, "नौ": 9, "दस": 10,
 }
 
 UNITS = {
@@ -118,8 +121,28 @@ class CorrectionResult:
     message: str = ""
 
 
+# "चार की जगह सात", "4 से 7 कर दो", "quantity बढ़ा दो": a change for sure.
+STRONG_UPDATE = re.compile(
+    r"जगह|instead|jagah|jagha|बदल|badal|change|update|modify|increase|decrease|quantity|मात्रा|बढ़ा|घटा|badha|ghata"
+    r"|(?<!\w)(?:\d+|" + "|".join(re.escape(w) for w in NUMBER_WORDS) + r")\s+(?:से|se|to)\s+(?:\d+|"
+    + "|".join(re.escape(w) for w in NUMBER_WORDS) + r")(?!\w)",
+    re.IGNORECASE,
+)
+# "सीरोम 500 के चार पत्ते ऐड कर दो" / "... भी जोड़ दो" / "... भी चाहिए": a new item.
+ADD_REQUEST = re.compile(r"ऐड|एड|(?<!\w)add(?!\w)|जोड़|jod|भी\s+(?:चाहिए|दे|दो|लिख)|(?<!\w)bhi(?!\w)", re.IGNORECASE)
+
+
+def is_strong_correction(text: str) -> bool:
+    """"की जगह", "4 से 7", "quantity": a change even after "हाँ हाँ"."""
+    return bool(STRONG_UPDATE.search(normalize(text)))
+
+
 def is_correction_request(text: str) -> bool:
     value = normalize(text)
+    if STRONG_UPDATE.search(value):
+        return True
+    if ADD_REQUEST.search(value):
+        return False
 
     return any(
         marker in value
@@ -127,8 +150,21 @@ def is_correction_request(text: str) -> bool:
     )
 
 
+_NEW_AFTER = re.compile(
+    r"(?:जगह|instead|jagah|jagha|से|se|to)\s+(\d+|" + "|".join(re.escape(w) for w in sorted(NUMBER_WORDS, key=len, reverse=True)) + r")(?!\w)",
+    re.IGNORECASE,
+)
+
+
 def parse_quantity(text: str):
     value = normalize(text)
+    new = _NEW_AFTER.search(value)
+    if new is not None:
+        # "चार की जगह सात पत्ते" / "4 से 7 कर दो": the number after is the new one.
+        raw = new.group(1)
+        unit_match = QUANTITY_PATTERN.match(value, new.start(1))
+        return (int(raw) if raw.isdigit() else NUMBER_WORDS.get(raw)), (
+            UNITS.get(unit_match.group(2)) if unit_match else None)
     matches = list(QUANTITY_PATTERN.finditer(value))
 
     if not matches:
@@ -217,7 +253,7 @@ def detect_correction(
     # Step 2: Parse new quantity.
     quantity, unit = parse_quantity(text)
 
-    if quantity is None or unit is None:
+    if quantity is None:
         return CorrectionResult(
             intent="CLARIFY_QUANTITY",
             message=(

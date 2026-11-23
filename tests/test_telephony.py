@@ -44,7 +44,7 @@ ADMIN = {"Authorization": "Bearer monitor-secret"}
 @pytest.fixture(autouse=True)
 def telephony_settings(monkeypatch):
     s = get_settings()
-    for key, value in {"telephony_enabled": True, "telephony_provider": "mock",
+    for key, value in {"telephony_enabled": True, "telephony_provider": "mock", "telephony_end_silence_ms": 700,
                        "telephony_stream_username": "demo", "telephony_stream_token": "stream-secret",
                        "telephony_monitor_token": "monitor-secret", "telephony_max_call_seconds": 30,
                        "greeting_delay_ms": 0, "exotel_minimal_media": True}.items():
@@ -371,7 +371,7 @@ def test_complete_mock_phone_order(simulated_gateway, seed_catalogue, db_session
 
 
 @pytest.mark.parametrize("text", ["change unknown quantity to three strips", "change clomin tab quantity to 101 strips", "change clomin tab quantity to zero strips"])
-def test_failed_corrections_block_confirmation(simulated_gateway, seed_catalogue, db_session, text):
+def test_failed_corrections_never_change_the_order(simulated_gateway, seed_catalogue, db_session, text):
     client, stt = simulated_gateway
     with client.websocket_connect("/telephony/media", headers=AUTH) as ws:
         ws.send_json(start())
@@ -383,11 +383,10 @@ def test_failed_corrections_block_confirmation(simulated_gateway, seed_catalogue
         ws.send_json({"event": "stop", "stream_sid": "stream-1"})
         with pytest.raises(WebSocketDisconnect):
             ws.receive_json()
-    assert db_session.scalar(select(func.count()).select_from(Order)) == 0
-    call = db_session.scalar(select(CallLog))
-    draft = db_session.scalar(select(OrderSession))
-    assert draft.status == "CANCELLED"
-    assert call.status == "DISCONNECTED" and call.ended_at
+    # The failed correction is read back as "nothing changed" and no longer
+    # blocks the caller's explicit confirmation of the unchanged order.
+    order = db_session.scalar(select(Order))
+    assert [(line.medicine_id, line.quantity) for line in order.line_items] == [("MED-00003", 1)]
 
 
 def test_noise_without_speech_is_skipped_and_call_continues(simulated_gateway, seed_catalogue, db_session):
@@ -409,6 +408,7 @@ def test_noise_without_speech_is_skipped_and_call_continues(simulated_gateway, s
         ws.send_json(start())
         drain(ws)
         send_audio(ws, 1)
+        time.sleep(0.5)
         send_audio(ws, 2)
         drain(ws)
         ws.send_json({"event": "stop", "stream_sid": "stream-1"})
@@ -785,6 +785,36 @@ def test_reply_barge_in_requires_sustained_speech(simulated_gateway, monkeypatch
                and "caller_turn_bytes=" in record.message for record in caplog.records)
 
 
+def test_provider_clear_keeps_call_open(simulated_gateway, monkeypatch, caplog):
+    client, stt = simulated_gateway
+
+    def long_tts(self, text, **kwargs):
+        return SynthesizedAudio(data=wav(bytes(32000)), sample_rate=8000, voice="mock")
+
+    monkeypatch.setattr(TTS, "synthesize", long_tts)
+    with client.websocket_connect("/telephony/media", headers=AUTH) as ws:
+        ws.send_json(start())
+        drain(ws)
+        stt.text = "add one strip of clomin"
+        send_audio(ws, 1)
+        assert ws.receive_json()["event"] == "media"
+        for sequence in range(2, 7):
+            send_voiced(ws, sequence, frames=1)
+        while ws.receive_json()["event"] != "clear":
+            pass
+        ws.send_json({"event": "clear", "stream_sid": "stream-1"})
+        send_audio(ws, 7)
+        assert ws.receive_json()["event"] in {"media", "mark"}
+        ws.send_json({"event": "stop", "stream_sid": "stream-1"})
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
+    assert any("telephony.media.clear_ignored reason=provider_clear" in record.message
+               for record in caplog.records)
+    assert not any("telephony.media.close_sent" in record.message
+                   and "stop_reason=provider_clear" in record.message
+                   for record in caplog.records)
+
+
 def test_database_failure_recorded(simulated_gateway, monkeypatch, db_session):
     from sqlalchemy.exc import OperationalError
     client, _ = simulated_gateway
@@ -1013,3 +1043,24 @@ def test_long_speech_heard_as_nothing_asks_to_repeat(db_session, seed_catalogue)
     assert reply is not None and "साफ़ सुनाई नहीं दिया" in reply.assistant_text
     assert reply.status.value == "ACTIVE"
     assert service.process(call.call_id, bytes(16000), threading.Event(), False) is None
+
+
+def test_natural_pause_does_not_end_the_turn():
+    import numpy as np
+    from app.services.telephony.audio_bridge import UtteranceBuffer, FRAME_BYTES
+    loud = (np.ones(FRAME_BYTES // 2) * 3000).astype("<i2").tobytes()
+    buf = UtteranceBuffer(end_silence_ms=1600)
+    turns = []
+    for chunk in [loud] * 5 + [bytes(FRAME_BYTES)] * 10 + [loud] * 5 + [bytes(FRAME_BYTES)] * 16:
+        turns += buf.feed(chunk)[0]
+    assert len(turns) == 1 and len(turns[0]) == (5 + 10 + 5 + 16) * FRAME_BYTES
+
+
+def test_back_to_back_turns_are_merged_once():
+    import asyncio
+    from app.api.telephony_routes import merge_queued_turns
+    q = asyncio.Queue()
+    for item in [(1, b"b"), (1, b"c"), (2, b"d")]:
+        q.put_nowait(item)
+    assert merge_queued_turns(q, 1, b"a", 100) == (b"abc", 2)
+    assert q.qsize() == 1

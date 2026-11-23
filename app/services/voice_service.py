@@ -41,7 +41,7 @@ from app.schemas.voice import (
     VoiceTurnRequest,
     VoiceTurnResponse,
 )
-from app.services.matching_service import MedicineMatchingService, normalize_text
+from app.services.matching_service import MedicineMatchingService, normalize_text, phonetic_key
 from app.services.medicine_attributes import (
     MedicineAttributes,
     attributes_from_candidate,
@@ -94,7 +94,7 @@ from app.services.voice.types import (
     VoiceState,
 )
 
-from app.services.voice.quantity_correction import detect_correction, is_correction_request
+from app.services.voice.quantity_correction import detect_correction, is_correction_request, is_strong_correction, parse_quantity
 from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -128,6 +128,9 @@ def _as_utc(value: datetime) -> datetime:
 
 _PACK_OF_TABLETS = re.compile(r"(?<!\w)\d+\s*['*]?\s*s(?!\w)", re.IGNORECASE)
 _LIQUID = re.compile(r"(?<!\w)(?:syp|syrup|susp|suspension)(?!\w)", re.IGNORECASE)
+
+
+_BOX_PACK = re.compile(r"(?<![A-Z])BOX(?:ES)?(?![A-Z])", re.IGNORECASE)
 
 
 def default_unit_for(description: str | None) -> OrderUnit | None:
@@ -397,6 +400,7 @@ class VoiceService:
         draft = self._handle_utterance(
             voice, state, payload.text, language, parsed=parsed
         )
+        self._track_unresolved(state, payload.text, draft, language)
         draft = self._shorten_repeat(state, draft, language)
         voice.turn_count += 1
         voice.last_intent = draft.intent.value
@@ -584,10 +588,23 @@ class VoiceService:
         Only when every part names a different catalogue medicine; "BRUFEN
         400 और दो स्ट्रिप" stays one request.
         """
+        counted = list(self._COUNT_THEN_UNIT.finditer(text))
+        if self._LIST_SEPARATOR.search(text):
+            counted = []
+        if len(counted) >= 2:
+            # Live Exotel call 13:38: "सीरम 500 के 5 पत्ते टोलो 650 के 4 पत्ते
+            # ब्रोफिन 200 के 5 पत्ते ऐड कर दो" had no commas.
+            text = self._COUNT_THEN_UNIT.sub(lambda m: m.group(0) + ",", text)
         if not self._LIST_SEPARATOR.search(text):
             return None
         parts = [p.strip(" ,.।") for p in self._LIST_SEPARATOR.split(text)]
         parts = [self._mark_strengths(p) for p in parts if p]
+        if len(counted) >= 2 and len(parts) > 2 and extract_quantity_unit(parts[-1])[0] is None                 and not self.matching.suggestions_from_utterance(parts[-1]):
+            parts.pop()  # "... के 5 पत्ते, ऐड कर दो" / ", चाहिए"
+        if len(parts) > 2 and is_nothing_more(parts[-1]):
+            parts.pop()
+        if len(parts) > 2 and self._NAME_MARKER.search(parts[0]) and extract_quantity_unit(parts[0])[0] is None:
+            parts.pop(0)  # "मेरा नाम हर्ष है, मुझे ... चाहिए": the name is taken separately
         if len(parts) < 2:
             return None
         named = [
@@ -607,6 +624,11 @@ class VoiceService:
         joined_by_word = bool(re.search(r"(?<!\S)(?:and|aur|or|और|तथा|फिर|phir|साथ में|saath mein)(?!\S)", text, re.IGNORECASE))
         return parts if joined_by_word else None
 
+    _COUNT_THEN_UNIT = re.compile(
+        r"(?<!\S)(?:\d+|एक|दो|तीन|चार|पांच|पाँच|छह|सात|आठ|नौ|दस|ek|do|teen|char|paanch|one|two|three|four|five)\s+"
+        r"(?:पत्ते|पत्ता|पत्ती|पट्टे|स्ट्रिप|strips?|बोतल|बोतलें|बॉटल|bottles?|डिब्बे|डिब्बा|गोली|गोलियां|tablets?)(?=\s+\S)",
+        re.IGNORECASE,
+    )
     _GLUED_DO_PATTE = re.compile(r"(?<!\S)(?:दुपत्ते|दुपत्ता|दोपत्ते|dupatte|dupatta|dopatte)(?!\S)", re.IGNORECASE)
     _UNIT_AFTER = r"\s*(?:के\s+|ke\s+)?(?:पत्ते|पत्ता|पत्ती|स्ट्रिप|strips?|patte|patta|बोतल|bottles?|गोली|goli|tablets?|डिब्बे|डिब्बा|box)(?!\w)"
 
@@ -720,6 +742,29 @@ class VoiceService:
             assistant_text=_text(f"धन्यवाद {name} जी। ", f"Thank you, {name}. ", language) + follow,
         )
 
+    @staticmethod
+    def _unclear_name_draft(language: str) -> TurnDraft:
+        return TurnDraft(intent=VoiceIntent.ADD_ITEM, language=language, assistant_text=_text(
+            "माफ़ कीजिए, दवा का नाम साफ़ सुनाई नहीं दिया। कृपया दवा का नाम दोबारा बताइए।",
+            "Sorry, I did not catch the medicine name. Please say it again.", language))
+
+    _CONTINUE_ORDER = re.compile(
+        r"(?:और|aur)\s+(?:भी\s+|और\s+|कोई\s+|koi\s+)*(?:दवा|दवाई|दवाइयां|दवाइयाँ|दवाएं|मेडिसिन|medicine|medicines|dawa|dawai)"
+        r"|(?:और|aur)\s+(?:कुछ\s+|kuch\s+|भी\s+)*(?:चाहिए|chahiye)|more medicines?|something else",
+        re.IGNORECASE,
+    )
+    _TENTATIVE_CONFIRM = re.compile(
+        r"(?:कन्फर्म|कंफर्म|confirm)\S*\s+(?:\S+\s+)?(?:कर\s+)?(?:दूं|दूँ|दू|दूंगा|दूँगा|दूंगी|करूं|करूँ|करू|करूंगा|करूँगा|करेंगे|karu|karun|dun|doon|dunga)(?![^\s।.,!?])"
+        r"|(?:कन्फर्म|कंफर्म|confirm)[^?]*\?",
+        re.IGNORECASE,
+    )
+
+    # "कन्फर्म कर दो" / "confirm karo": a clear go-ahead, even beside a "करूँ".
+    _CLEAR_CONFIRM = re.compile(
+        r"(?:कन्फर्म|कंफर्म|confirm)\S*\s+(?:कर\s+)?(?:दो|दीजिए|दीजिये|करो|करें|करिए|karo|kar\s+do|kardo)(?![^\s।.,!?])",
+        re.IGNORECASE,
+    )
+
     def _pending_question(self, pending, language: str) -> str:
         if pending.kind == "candidate":
             return self._candidate_retry_prompt(pending, language)
@@ -730,6 +775,21 @@ class VoiceService:
             match_type="EXACT_NAME",
         )
         return self._quantity_prompt(candidate, pending.quantity, pending.unit, language)
+
+    _NAMED_NOT_FOUND = re.compile(r"([^।.?]+?) (?:हमारी लिस्ट में नहीं मिली|is not in our list)")
+
+    def _track_unresolved(self, state, heard: str, draft: TurnDraft, language: str) -> None:
+        text = draft.assistant_text
+        names = [m.group(1).strip().removeprefix("ठीक है, ") for m in self._NAMED_NOT_FOUND.finditer(text)]
+        names = [n for n in names if not n.startswith(("यह", "This", "That"))]
+        if not names and (text.startswith(not_found_text(language)) or "साफ़ सुनाई नहीं दिया" in text
+                          or "did not catch the medicine" in text):
+            query = " ".join(w for w in (self._parse_intent(heard, language, None).medicine_query or "").split()
+                             if extract_quantity(w) is None)
+            names = [query] if query else []
+        for name in names:
+            if name and name not in state.unresolved:
+                state.unresolved = (state.unresolved + [name])[-5:]
 
     def _shorten_repeat(self, state, draft: TurnDraft, language: str) -> TurnDraft:
         """The same "not found" / "unclear quantity" twice in a row: say it short.
@@ -742,8 +802,23 @@ class VoiceService:
         short = None
         if text == state.last_reply:
             if text == not_found_text(language):
-                short = _text("यह भी लिस्ट में नहीं मिली। कोई और दवा बताइए।",
-                              "That is not in our list either. Please say another medicine.", language)
+                short = _text("यह भी लिस्ट में नहीं मिली। दवा का नाम धीरे-धीरे बोलिए या उसकी स्पेलिंग बताइए। "
+                              "नहीं चाहिए तो 'छोड़ दो' बोलें।",
+                              "That is not in our list either. Say the name slowly or spell it, or say 'skip' to leave it.", language)
+            elif (state.pending is not None and state.pending.kind == "candidate" and state.pending.candidates
+                  and state.pending.match_status != "STRENGTH_GUESS"
+                  and len({normalize_text(c.medicine_name) for c in state.pending.candidates}) == 1):
+                name = state.pending.candidates[0].medicine_name
+                short = _text(
+                    f"{name} अभी तय नहीं हुई। {self._variant_question(state.pending.candidates, language)} "
+                    "या यह दवा छोड़ने के लिए 'नहीं' बोलें।",
+                    f"{name} is still open. {self._variant_question(state.pending.candidates, language)} "
+                    "Or say 'no' to skip it.", language)
+            elif (state.pending is not None and state.pending.kind == "candidate" and state.pending.candidates
+                  and state.pending.match_status != "STRENGTH_GUESS"):
+                names = list(dict.fromkeys(c.medicine_name for c in state.pending.candidates))
+                short = self._which_medicine_prompt(names, language) + _text(
+                    " या यह दवा छोड़ने के लिए 'नहीं' बोलें।", " Or say 'no' to skip it.", language)
             elif text == self._repeat_quantity_text(language):
                 short = _text("कृपया सिर्फ़ एक मात्रा बताइए, जैसे दो पत्ते।",
                               "Please say just one quantity, for example two strips.", language)
@@ -859,6 +934,11 @@ class VoiceService:
                 )
         if parsed is None and voice.status == ACTIVE:
             parts = self._split_medicines(text)
+            if parts and not voice.order_session.customer_name and self._NAME_MARKER.search(text):
+                name = extract_caller_name(re.split(r"[।.]", self._LIST_SEPARATOR.split(text)[0])[0])
+                if name:
+                    voice.order_session.customer_name = name[:255]
+                    state.name_asks = 2
             if parts:
                 # Live call (the client): a whole list said while the AI was
                 # asking about MAXTRA P was refused as "unclear quantity".
@@ -887,7 +967,7 @@ class VoiceService:
             draft = self._fraction_strength_draft(state, text, language) or self._handle_text(
                 voice, state, text, language
             )
-        if said or in_list:
+        if (said or in_list) and draft.intent in (VoiceIntent.ADD_ITEM, VoiceIntent.SELECT_CANDIDATE):
             if state.pending is None and not state.queued and len(voice.order_session.items) == before:
                 # The last item of a list was not found: say so briefly.
                 draft = replace(draft, order_summary=self._safe_summary(self.orders.get_summary(voice.order_session.session_id), language) if voice.order_session.items else None, assistant_text=self._list_brief(draft, text, before, voice, language) + " " + _text(
@@ -935,6 +1015,11 @@ class VoiceService:
             return self._brief(draft)
         if "लिस्ट में नहीं है" in draft.assistant_text or "is not in our list" in draft.assistant_text:
             return draft.assistant_text
+        if "पहले से ऑर्डर में है" in draft.assistant_text or "already in the order" in draft.assistant_text:
+            return draft.assistant_text
+        for skipped in ("ठीक है, वह दवा नहीं जोड़ी।", "Okay, I did not add it."):
+            if draft.assistant_text.startswith(skipped):
+                return skipped
         heard = (self._parse_intent(part, language, None).medicine_query or part).strip()
         heard = heard.upper() if heard.isascii() else heard
         return _text(f"{heard} हमारी लिस्ट में नहीं मिली।", f"{heard} is not in our list.", language)
@@ -950,6 +1035,53 @@ class VoiceService:
     ) -> TurnDraft:
         if parsed is None:
             parsed = self._parse_intent(text, language, state.pending)
+
+        rest = ""
+        if self._CONTINUE_ORDER.search(text):
+            rest = re.sub(r"^[\s,.।]*(?:भी\s+)?(?:चाहिए|चाहिये|chahiye)?[\s,.।]*", "",
+                          self._CONTINUE_ORDER.split(text, 1)[-1])
+        if rest and (self.matching.suggestions_from_utterance(rest) or extract_quantity_unit(rest)[0] is not None):
+            # Live Exotel call 12:57: "हाँ और दवाई भी चाहिए। जीरोम 500 के चार
+            # पत्ते ऐड कर दो" read the order back. The new item is handled.
+            state.summary_digest = None
+            first_word = (normalize_text(text).split() or [""])[0]
+            said = ""
+            if (state.pending is not None and state.pending.match_status == "STRENGTH_GUESS"
+                    and is_plain_affirmative(first_word)):
+                guess, state.pending = state.pending, None
+                said = self._brief(self._add_candidate(voice, state, guess.candidates[0], guess.quantity, guess.unit, language)) + " "
+            draft = self._handle_utterance(voice, state, rest, language)
+            return replace(draft, assistant_text=said + draft.assistant_text) if said else draft
+        if (self._CONTINUE_ORDER.search(text) and not self.matching.suggestions_from_utterance(text)
+                and extract_quantity_unit(text)[0] is None):
+            # Live call: "हाँ, और दवाई भी चाहिए" read the order back as final.
+            state.summary_digest = None
+            first_word = (normalize_text(text).split() or [""])[0]
+            if (state.pending is not None and state.pending.match_status == "STRENGTH_GUESS"
+                    and is_plain_affirmative(first_word)):
+                # "हाँ, और दवाई भी चाहिए" to "क्या आपको BRUFEN 200MG चाहिए?": yes, and more.
+                guess, state.pending = state.pending, None
+                added = self._add_candidate(voice, state, guess.candidates[0], guess.quantity, guess.unit, language)
+                if state.pending is None:
+                    return replace(added, assistant_text=self._brief(added) + _text(
+                        " और कौन सी दवा चाहिए?", " Which other medicine?", language))
+                return added
+            follow = (self._pending_question(state.pending, language) if state.pending is not None
+                      else _text("और कौन सी दवा चाहिए? नाम और मात्रा बताइए।",
+                                 "Which other medicine do you want? Say its name and quantity.", language))
+            return TurnDraft(intent=VoiceIntent.ADD_ITEM, language=language,
+                             assistant_text=_text("जी, बताइए। ", "Sure. ", language) + follow)
+
+        if (self._TENTATIVE_CONFIRM.search(text) and not self._CLEAR_CONFIRM.search(text)
+                and voice.order_session.items):
+            # Live call: "कन्फर्म कर दूं।" saved the order. A question or "shall
+            # I" is not a go-ahead: read the order and ask for a clear yes.
+            state.pending = None
+            state.queued = []
+            draft = self._show_summary(voice, state, language)
+            return replace(draft, assistant_text=draft.assistant_text + _text(
+                " पक्का करने के लिए साफ़ बोलें: हाँ, कन्फर्म करो।",
+                " To place it, say clearly: yes, confirm.", language))
 
         if (
             state.pending is not None
@@ -1034,6 +1166,14 @@ class VoiceService:
                 ),
             )
 
+        if state.pending is not None and is_plain_affirmative(text) and (
+            (state.pending.kind != "candidate" and state.pending.quantity is None)
+            or (state.pending.kind == "candidate" and state.pending.match_status != "STRENGTH_GUESS"
+                and len(state.pending.candidates) > 1)
+        ):
+            return TurnDraft(intent=VoiceIntent.ADD_ITEM, language=language,
+                             assistant_text=self._pending_question(state.pending, language))
+
         if (
             state.pending is not None
             and state.pending.match_status == "STRENGTH_GUESS"
@@ -1070,7 +1210,9 @@ class VoiceService:
         if (
             is_correction_request(text)
             and voice.status == ACTIVE
-            and parsed.intent not in control_intents
+            # Live Exotel call 12:57: "हाँ हाँ दोनों 650 की चार की जगह सात तक"
+            # right after the read-back confirmed the order unchanged.
+            and (parsed.intent not in control_intents or is_strong_correction(text))
         ):
             state.guard.correction_started()
             state.summary_digest = None
@@ -1230,6 +1372,15 @@ class VoiceService:
 
         mentioned = self.matching.suggestions_from_utterance(text)
         result = self.matching.search(query)
+        if result.status == "NOT_FOUND" and not result.candidates and not mentioned:
+            # "टेरॉम 500 की चार पत्री": the name alone is too far off, but the
+            # spoken strength can confirm a numbered catalogue name (CEROM 500).
+            limit = self.settings.max_order_item_quantity
+            said = [w for w in normalize_text(normalize_spoken_strengths(text)).split() if w.isdigit() and int(w) > limit]
+            if said:
+                retry = self.matching.search(f"{query} {' '.join(said)}")
+                if retry.candidates:
+                    result = retry
         heard_names = {normalize_text(c.medicine_name) for c in mentioned}
         if (
             len(heard_names) == 1
@@ -1312,6 +1463,16 @@ class VoiceService:
 
         if result.candidates:
             spoken = self._selection_attributes(text, result.candidates)
+            if spoken.strengths and not mentioned:
+                # Live call: "इरोम ₹500 के पांच पत्ते" was offered CREMA ANO 20GM.
+                # A near name whose own strength contradicts the spoken one is
+                # another medicine.
+                kept = [c for c in result.candidates
+                        if strictly_matches(c, spoken) or not description_strength_tokens(
+                            f"{c.medicine_name} {c.description or ''}")]
+                if not kept:
+                    return self._unclear_name_draft(language)
+                result = result.model_copy(update={"candidates": kept})
             strict_candidates = [
                 candidate for candidate in result.candidates
                 if strictly_matches(candidate, spoken)
@@ -1434,6 +1595,16 @@ class VoiceService:
         offer = self._strength_not_listed(
             state, mentioned, text, quantity, unit, language
         ) or self._listed_strengths_draft(state, mentioned, text, quantity, unit, language)
+        if offer is None and not mentioned:
+            # Live Exotel call 13:38: "दोनों 650 के 4 पत्ते" (DOLO 650 misheard).
+            # A strength only one listed medicine has is offered as a yes/no.
+            limit = self.settings.max_order_item_quantity
+            values = {w for w in normalize_text(normalize_spoken_strengths(text)).split() if w.isdigit() and int(w) > limit}
+            if len(values) == 1:
+                value = next(iter(values))
+                owners = {normalize_text(c.medicine_name) for c in self._strength_candidates(value)}
+                if len(owners) == 1:
+                    return self._offer_by_strength(voice, state, value, language, quantity, unit, ask_first=True)
         return offer or self._not_found_draft(state, language)
 
     def _add_candidate(
@@ -1451,6 +1622,20 @@ class VoiceService:
             # "दो पत्ते" for a syrup: Hindi callers say पत्ते for any pack. A
             # syrup comes in bottles; the read-back says "2 बोतल".
             unit = OrderUnit.BOTTLE
+        if unit in (OrderUnit.STRIP, OrderUnit.TABLET, OrderUnit.BOTTLE) and _BOX_PACK.search(
+            candidate.description or ""
+        ) and default_unit_for(candidate.description) is None:
+            # Live call: "ARACHITOL NANO SUGAR FREE की 2 बोतल" for a BOX pack.
+            # The catalogue cannot tell how many bottles a box is: ask in boxes.
+            state.pending = VoicePendingState(
+                kind="quantity", medicine_id=candidate.medicine_id,
+                medicine_name=candidate.medicine_name, description=candidate.description,
+                quantity=None, unit=OrderUnit.BOX,
+            )
+            name = spoken_name(candidate)
+            return TurnDraft(intent=VoiceIntent.ADD_ITEM, language=language, assistant_text=_text(
+                f"{name} डिब्बे में आती है, {UNIT_LABELS_HI.get(unit, 'पत्ते')} में नहीं। कितने डिब्बे चाहिए?",
+                f"{name} comes in boxes, not {unit.value.lower()}s. How many boxes?", language))
         if quantity is not None and unit is None:
             # "दो" for a 15'S tablet pack means two strips. The reply reads the
             # unit back and the order still needs an explicit confirmation.
@@ -1472,6 +1657,17 @@ class VoiceService:
                 ),
             )
 
+        same = next((i for i in voice.order_session.items if i.medicine_id == candidate.medicine_id
+                     and i.quantity == quantity and i.unit == unit.value), None)
+        if same is not None:
+            # Live Exotel call 13:38: the caller said DOLO 650 x4 again and the
+            # order got 8. The same item and count again is a repeat.
+            state.pending = None
+            label = spoken_name(candidate)
+            unit_word = UNIT_LABELS_HI.get(unit, "") if language == "hi" else unit.value.lower()
+            return TurnDraft(intent=VoiceIntent.ADD_ITEM, language=language, assistant_text=_text(
+                f"{label} की {quantity} {unit_word} पहले से ऑर्डर में है, दोबारा नहीं जोड़ी।",
+                f"{label}, {quantity} {unit_word}, is already in the order; not added again.", language))
         try:
             order_session = self.orders.add_item(
                 voice.order_session.session_id,
@@ -1538,6 +1734,17 @@ class VoiceService:
         if options > 1 and state.pending is not None and state.pending.kind == "quantity":
             state.pending = state.pending.model_copy(update={"chosen": True})
 
+    @staticmethod
+    def _note_dropped(pending, draft: TurnDraft, language: str) -> TurnDraft:
+        """A new request while a choice was open: the open item is said to be
+        left out, never dropped silently (live call: CEROM vanished)."""
+        names = list(dict.fromkeys(c.medicine_name for c in pending.candidates))
+        if len(names) != 1 or names[0] in draft.assistant_text:
+            return draft
+        return replace(draft, assistant_text=_text(
+            f"{names[0]} तय नहीं हुई थी, उसे छोड़ दिया। ", f"{names[0]} was not decided, so I left it out. ", language,
+        ) + draft.assistant_text)
+
     def _defer(self, state, pending) -> None:
         if pending.medicine_id is None or any(
             d.medicine_id == pending.medicine_id for d in state.deferred
@@ -1585,7 +1792,7 @@ class VoiceService:
             text, {c.medicine_name for c in pending.candidates}
         )
         if switched is not None:
-            return switched(voice, state, language)
+            return self._note_dropped(pending, switched(voice, state, language), language)
 
         parsed_new = self._parse_intent(text, language, None)
         if (
@@ -1597,8 +1804,16 @@ class VoiceService:
             )
         ):
             state.pending = None
-            return self._handle_add(voice, state, parsed_new, text, language)
+            return self._note_dropped(pending, self._handle_add(voice, state, parsed_new, text, language), language)
 
+        by_words =self._select_variant_by_words(pending.candidates, text, extract_quantity_unit(text)[1])
+        if by_words is not None:
+            quantity, unit, _ = extract_quantity_unit(self._without_medicine_name(text, by_words))
+            self._log_matching("candidate_pending", text, pending.candidates, by_words, "STRICT_MATCH")
+            draft = self._add_candidate(voice, state, by_words, quantity or pending.quantity,
+                                        (unit if quantity else None) or pending.unit, language)
+            self._mark_chosen(state, len(pending.candidates))
+            return draft
         if pending.match_status == "NAMES_HEARD":
             return self._narrow_to_named_medicine(voice, state, pending, text, language)
         if pending.match_status == "STRENGTH_GUESS":
@@ -1625,7 +1840,7 @@ class VoiceService:
                 or spoken_hundreds(text)
             ):
                 state.pending = None
-                return self._handle_text(voice, state, text, language)
+                return self._note_dropped(pending, self._handle_text(voice, state, text, language), language)
             gave_up = self._count_retry(state, pending, language)
             if gave_up is not None:
                 return gave_up
@@ -2320,13 +2535,34 @@ class VoiceService:
         for alias, target in sorted(self.matching._aliases().items(), key=lambda pair: -len(pair[0])):
             if target in draft_names:
                 correction_text = re.sub(rf"(?<!\w){re.escape(alias)}(?!\w)", lambda _: target, correction_text, flags=re.IGNORECASE)
+        swapped = self._replace_medicine(voice, state, text, items, language)
+        if swapped is not None:
+            return swapped
         result = detect_correction(correction_text, items)
+        if result.intent == "CLARIFY_MEDICINE":
+            # "दोनों 650 की चार की जगह सात" (DOLO 650 misheard): a strength said
+            # that exactly one order item has names that item.
+            said = {w for w in normalize_text(text).split() if w.isdigit() and int(w) > self.settings.max_order_item_quantity}
+            owners = [i for i in items if said & description_strength_tokens(f"{i['medicine_name']} {i['description'] or ''}")]
+            new_quantity, new_unit = parse_quantity(text)
+            if said and len(owners) == 1 and new_quantity:
+                result = replace(result, intent="UPDATE_ITEM", item_id=owners[0]["id"],
+                                 medicine_id=owners[0]["medicine_id"], quantity=new_quantity, unit=new_unit)
         explicit_reference = contains_medicine_id(text) or extract_ordinal(text) or mentions_last_item(text)
         if result.intent == "UPDATE_ITEM":
             item = next(i for i in voice.order_session.items if i.id == result.item_id)
             prompt = None
         elif explicit_reference:
             item, prompt = self._resolve_item(voice, state, text, language)
+        elif result.intent == "CLARIFY_MEDICINE" and items:
+            names = list(dict.fromkeys(spoken_name(MedicineMatchCandidate(
+                medicine_id=i["medicine_id"], medicine_name=i["medicine_name"],
+                description=i["description"], match_type="EXACT_NAME")) for i in items))
+            item, prompt = None, _text(
+                "किस दवा की मात्रा बदलनी है: " + ", ".join(names) + "? दवा का नाम और नई मात्रा बताइए।",
+                "Which medicine should I change: " + ", ".join(names) + "? Say its name and the new quantity.",
+                language,
+            )
         else:
             # Live call: a Hindi caller got this English-only message.
             item, prompt = None, _text(
@@ -2341,7 +2577,10 @@ class VoiceService:
                 assistant_text=prompt or "",
             )
 
-        quantity, unit, _ = extract_quantity_unit(text)
+        if result.intent == "UPDATE_ITEM":
+            quantity, unit = result.quantity, OrderUnit(result.unit) if result.unit else None
+        else:
+            quantity, unit, _ = extract_quantity_unit(text)
         if quantity is None:
             quantity = extract_quantity(text)
         if quantity is None and unit is None:
@@ -2390,6 +2629,34 @@ class VoiceService:
             ),
             order_summary=summary,
         )
+
+    _INSTEAD = re.compile(r"\s*(?:की|के|का)?\s*(?:जगह|बजाय|jagah|jagha)\s*|\s+instead\s+of\s+", re.IGNORECASE)
+
+    def _replace_medicine(self, voice, state, text: str, items: list[dict], language: str) -> TurnDraft | None:
+        """Live Exotel call 13:25: "ब्रोफिन 200 की जगह ब्रोफिन 400 दो पत्ते" kept
+        BRUFEN 200 with a new count. A different strength after "की जगह" is a
+        new medicine: the old item is removed and the new one is asked as usual."""
+        parts = self._INSTEAD.split(text, 1)
+        if len(parts) != 2:
+            return None
+        limit = self.settings.max_order_item_quantity
+        numbers = lambda s: {w for w in normalize_text(normalize_spoken_strengths(s)).split() if w.isdigit() and int(w) > limit}
+        old_said, new_said = numbers(parts[0]), numbers(parts[1])
+        if not old_said or not new_said or new_said <= old_said:
+            return None
+        owners = [i for i in items if old_said & description_strength_tokens(f"{i['medicine_name']} {i['description'] or ''}")]
+        if len(owners) != 1:
+            return None
+        old = owners[0]
+        self.orders.delete_item(voice.order_session.session_id, old["id"])
+        state.guard.correction_completed()
+        state.summary_digest = None
+        state.pending = None
+        name = spoken_name(MedicineMatchCandidate(medicine_id=old["medicine_id"], medicine_name=old["medicine_name"],
+                                                  description=old["description"], match_type="EXACT_NAME"))
+        draft = self._handle_text(voice, state, parts[1], language)
+        return replace(draft, intent=VoiceIntent.UPDATE_ITEM, assistant_text=_text(
+            f"{name} हटा दी। ", f"Removed {name}. ", language) + draft.assistant_text)
 
     def _handle_remove(
         self,
@@ -2440,13 +2707,31 @@ class VoiceService:
         language: str,
     ) -> TurnDraft:
         if state.guard.pending_correction:
-            return TurnDraft(intent=VoiceIntent.SHOW_SUMMARY, language=language,
-                assistant_text=_text("पहले लंबित मात्रा बदलाव पूरा करें।", "Please resolve the pending correction before reviewing or confirming the order.", language))
+            # Live call 2026-11-23: a correction that was never understood
+            # refused eleven "order confirm"s. Drop it and read the order back.
+            state.guard.correction_completed()
+            draft = self._show_summary(voice, state, language)
+            return replace(draft, assistant_text=_text(
+                "पिछला बदलाव समझ नहीं आया, इसलिए कुछ नहीं बदला। ", "The last change was not understood, so nothing was changed. ", language,
+            ) + draft.assistant_text)
         summary = self.orders.get_summary(
             voice.order_session.session_id
         )
         if summary.can_confirm:
             state.guard.summary_presented(summary.summary_digest)
+        left_out = ""
+        in_order = {normalize_text(i.medicine_name) for i in summary.items}
+        state.unresolved = [
+            name for name in state.unresolved
+            if not any(score >= 0.6 and normalize_text(c.medicine_name) in in_order
+                       for c, score in self.matching.score_candidates(name, 1))
+        ]
+        if state.unresolved and summary.items:
+            # Live Exotel call 13:38: CEROM and ANAFORTAN were never added and
+            # "हाँ जी" confirmed without a word about them.
+            left_out = _text("ये दवाइयाँ ऑर्डर में नहीं जुड़ीं: " + ", ".join(state.unresolved) + "। ",
+                             "These were not added: " + ", ".join(state.unresolved) + ". ", language)
+            state.unresolved = []
         safe_summary = self._safe_summary(summary, language)
         state.summary_digest = (
             summary.summary_digest if summary.can_confirm else None
@@ -2454,7 +2739,7 @@ class VoiceService:
         return TurnDraft(
             intent=VoiceIntent.SHOW_SUMMARY,
             language=language,
-            assistant_text=self._summary_text(summary, language),
+            assistant_text=left_out + self._summary_text(summary, language),
             order_summary=safe_summary,
         )
 
@@ -2466,15 +2751,22 @@ class VoiceService:
     ) -> TurnDraft:
         state.deferred = []
         if state.guard.pending_correction:
-            return TurnDraft(intent=VoiceIntent.CONFIRM_ORDER, language=language,
-                assistant_text=_text("पहले लंबित बदलाव पूरा करें।", "Confirmation is blocked until the pending correction is resolved.", language))
+            state.pending = None
+            state.queued = []
+            return self._show_summary(voice, state, language)
         if state.pending is not None:
             # Live call: Whisper heard "हाँ" as "CREMAFFIN", which opened a new
             # item choice, and every "confirm" after that was refused. The
             # half-chosen item was never added: drop it and read the order
             # back, so the caller confirms exactly what they hear.
+            dropped = state.pending.medicine_name or (
+                state.pending.candidates[0].medicine_name if state.pending.candidates else "")
             state.pending = None
-            return self._show_summary(voice, state, language)
+            state.queued = []
+            draft = self._show_summary(voice, state, language)
+            return replace(draft, assistant_text=_text(
+                f"{dropped} तय नहीं हुई, इसलिए नहीं जोड़ी। ", f"{dropped} was not decided, so it was not added. ", language,
+            ) + draft.assistant_text) if dropped else draft
 
         order_session = voice.order_session
         if (
@@ -2686,7 +2978,7 @@ class VoiceService:
         fuzzy = pending.match_status != "NAME_HEARD" and any(
             candidate.match_type == "FUZZY_SUGGESTION"
             for candidate in candidates
-        )
+        ) and len({normalize_text(c.medicine_name) for c in pending.candidates}) > 1
         explicit_name = [
             candidate
             for candidate in candidates
@@ -2753,6 +3045,7 @@ class VoiceService:
             distinct = own - others
             if any(
                 token == word or (len(word) >= 4 and fuzz.ratio(token, word) >= 80)
+                or (len(phonetic_key(word)) >= 2 and phonetic_key(token) == phonetic_key(word))
                 for token in spoken for word in distinct
             ):
                 matches.append(candidates[index])
@@ -2899,7 +3192,7 @@ class VoiceService:
         fuzzy: bool,
     ) -> str:
         options = self._format_candidates(candidates)
-        if fuzzy:
+        if fuzzy and len({normalize_text(c.medicine_name) for c in candidates}) > 1:
             return _text(
                 "कौन सी दवा चाहिए? दवा का नाम और strength, या medicine ID बताएं: ",
                 "Which medicine do you want? Say its name and strength, or the medicine ID: ",
@@ -2918,7 +3211,7 @@ class VoiceService:
         if pending.match_status == "STRENGTH_GUESS":
             return self._strength_guess_question(pending, language)
         fuzzy = pending.match_status == "NOT_FOUND"
-        if fuzzy:
+        if fuzzy and len({normalize_text(c.medicine_name) for c in pending.candidates}) > 1:
             return _text(
                 "कौन सी दवा चाहिए? दवा का नाम और strength, या medicine ID बताएं: ",
                 "Which medicine do you want? Say its name and strength, or the medicine ID: ",

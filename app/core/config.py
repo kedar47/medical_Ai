@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     telephony_max_call_seconds: int = Field(default=600, ge=10, le=3600)
     telephony_silence_seconds: int = Field(default=45, ge=5, le=300)
     telephony_vad_threshold: int = Field(default=450, ge=100, le=10000)
+    telephony_end_silence_ms: int = Field(default=1600, ge=300, le=3000)
     telephony_turn_queue_size: int = Field(default=4, ge=2, le=16)
     greeting_delay_ms: int = Field(default=1500, ge=0, le=10000)
     exotel_minimal_media: bool = True

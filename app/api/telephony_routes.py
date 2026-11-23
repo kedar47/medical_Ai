@@ -51,6 +51,20 @@ _ORDER_CHANGED_MARKERS = ("जोड़ दी", "Added", "बदल दी", "�
 def is_retry_reply(text: str) -> bool:
     return any(m in text for m in _RETRY_MARKERS) and not any(m in text for m in _ORDER_CHANGED_MARKERS)
 
+
+def merge_queued_turns(queue: asyncio.Queue, generation: int, pcm: bytes, limit: int) -> tuple[bytes, int]:
+    """Join turns the caller spoke back to back so one list is processed once."""
+    merged = 0
+    audio = bytearray(pcm)
+    while not queue.empty():
+        queued_generation, nxt = queue._queue[0]
+        if queued_generation != generation or len(audio) + len(nxt) > limit:
+            break
+        queue.get_nowait()
+        audio.extend(nxt)
+        merged += 1
+    return bytes(audio), merged
+
 BARGE_IN_SPEECH_BYTES = 4 * FRAME_BYTES
 # This CPU demo intentionally accepts one media call per API process.
 CALL_SLOT = threading.BoundedSemaphore(1)
@@ -232,6 +246,7 @@ async def handle_media(ws: WebSocket, factory):
     buffer = UtteranceBuffer(
         s.telephony_vad_threshold,
         max_seconds=25 if s.voice_stt_provider == "sarvam" and s.sarvam_api_key else 12,
+        end_silence_ms=s.telephony_end_silence_ms,
     )
     queue = asyncio.Queue(maxsize=s.telephony_turn_queue_size)
     playback = None
@@ -382,6 +397,9 @@ async def handle_media(ws: WebSocket, factory):
         while True:
             queued_generation, pcm = await queue.get()
             turn_inflight = True
+            pcm, merged = merge_queued_turns(queue, queued_generation, pcm, buffer.max_frames * FRAME_BYTES)
+            for _ in range(merged):
+                queue.task_done()
             current = generation
             try:
                 if queued_generation != current:
@@ -571,11 +589,8 @@ async def handle_media(ws: WebSocket, factory):
                 stop_reason = "provider_stop"
                 break
             elif event == "clear":
-                # Do not silently erase an order. End this stream and cancel its draft.
-                cancel_playback("clear", caller_turn_bytes=len(buffer.audio))
-                expected_mark = None
-                stop_reason = "provider_clear"
-                break
+                logger.info("telephony.media.clear_ignored reason=provider_clear stream_sid=%s "
+                            "caller_turn_bytes=%s", stream, len(buffer.audio))
             elif event == "dtmf":
                 continue  # Never treat DTMF as explicit spoken order confirmation.
             else:

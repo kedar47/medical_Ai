@@ -51,6 +51,9 @@ class VoiceState(BaseModel):
     deferred: list[VoicePendingState] = Field(default_factory=list)
     # The rest of "कॉम्बिफ्लेम दो पत्ते और डिस्प्रिन एक पत्ता": one medicine at a time.
     queued: list[str] = Field(default_factory=list)
+    # Medicines asked for but not found or not heard clearly; named before the
+    # read-back so nothing is left out silently.
+    unresolved: list[str] = Field(default_factory=list)
     # Times the caller was asked for their name (asked in the greeting).
     name_asks: int = 0
     # The previous reply, to keep a repeated "not found" short.

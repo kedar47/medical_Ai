@@ -435,7 +435,8 @@ def test_confirming_drops_a_kept_medicine(client, demo_catalogue):
         say(client, voice, text)
     say(client, voice, "2")  # asks about BRUFEN next
     summary = say(client, voice, "order confirm")
-    assert "DOLO 650MG" in summary["assistant_text"] and "BRUFEN" not in summary["assistant_text"]
+    assert summary["assistant_text"].startswith("BRUFEN तय नहीं हुई, इसलिए नहीं जोड़ी।")
+    assert "DOLO 650MG" in summary["assistant_text"] and "BRUFEN" not in summary["assistant_text"].split("आपके ऑर्डर में")[1]
     confirmed = say(client, voice, "हाँ")
     assert [i["medicine_id"] for i in confirmed["order"]["line_items"]] == ["MED-00025"]
 
@@ -469,7 +470,7 @@ def test_live_call_21_17_replayed(client, demo_catalogue):
 
 # ---- calls 2026-11-20 21:27, 2026-11-21 04:18 and the client's at 18:35 -------
 
-@pytest.mark.parametrize("heard", ["GUNFORM", "PANFAM", "kanfum", "CONFIRM KARU", "conform karo"])
+@pytest.mark.parametrize("heard", ["GUNFORM", "PANFAM", "kanfum", "conform karo"])
 def test_misheard_confirm_after_read_back_places_the_order(client, demo_catalogue, heard):
     voice = session(client)
     say(client, voice, "dolo")

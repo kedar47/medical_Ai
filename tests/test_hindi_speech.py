@@ -566,7 +566,7 @@ def test_misheard_name_prompt_no_longer_asks_for_full_name(client,seed_catalogue
     english=client.post('/voice/sessions',json={'language':'en'}).json()
     result=turn(client,english,'add brufn one strip')
     assert result['candidates'] and 'full name' not in result['assistant_text']
-    assert 'medicine ID' in result['assistant_text']
+    assert result['assistant_text'] == 'Do you want BRUFEN 200MG, 400MG or 600MG?'
 
 
 def test_hint_echoed_without_commas_is_no_speech(monkeypatch):

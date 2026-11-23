@@ -266,3 +266,14 @@ def test_other_script_asks_to_repeat_and_late_name_is_saved(client, client_catal
     say(client, voice, "बस")
     say(client, voice, "हाँ")
     assert db_session.query(Order).one().customer_name == "नितिन प्रजापति"
+
+
+def test_continuous_list_is_one_draft_then_confirmed(client, client_catalogue, db_session):
+    voice = session(client)
+    listed = say(client, voice, "Brufen 200 ki 2 strips, Dolo 650 ki 3 strips aur Arachitol ki 1 bottle, bas.")
+    assert cart(listed) == [("MED-00013", 2, "STRIP"), ("MED-104706", 3, "STRIP")]
+    assert "ARACHITOL" in listed["assistant_text"].upper()
+    assert listed["status"] != "CONFIRMED" and db_session.query(Order).count() == 0
+    assert "कन्फर्म" in say(client, voice, "बस")["assistant_text"]
+    assert say(client, voice, "हाँ")["status"] == "CONFIRMED"
+    assert db_session.query(Order).count() == 1

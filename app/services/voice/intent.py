@@ -524,6 +524,11 @@ FILLER_WORDS = {
     "जोड़ो",
     "जोड़िए",
     "जोड़",
+    "ऐड",
+    "एड",
+    "add",
+    "कर",
+    "करो",
     "डालो",
     "डालिए",
     "karo",
@@ -828,6 +833,8 @@ def extract_quantity_unit(
             candidates.append(match)
     if candidates:
         match = min(candidates, key=lambda item: item.start())
+        if len(candidates) == 2 and candidates[1].start() < candidates[0].start() < candidates[1].end():
+            match = candidates[0]  # "टैबलेट 5 स्ट्रिप": the unit after the number counts
         quantity = _parse_quantity_value(match.group("qty"))
         unit = _unit_for_alias(match.group("unit"))
         remaining = text[: match.start()] + " " + text[match.end() :]

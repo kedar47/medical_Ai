@@ -67,7 +67,10 @@ def answer_xml(stream_url: str, phone: str | None) -> str:
         '<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n'
         f'  <Stream bidirectional="true" keepCallAlive="true" audioTrack="inbound" '
         f'contentType={quoteattr(f"{CONTENT_TYPE};rate={SAMPLE_RATE}")}{extra}>'
-        f"{escape(stream_url)}</Stream>\n</Response>\n"
+        f"{escape(stream_url)}</Stream>\n"
+        # keepCallAlive holds the call until our side closes the stream; then
+        # end it here, otherwise Plivo asks the answer URL again.
+        "  <Hangup/>\n</Response>\n"
     )
 
 

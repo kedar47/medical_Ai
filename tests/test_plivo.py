@@ -130,6 +130,8 @@ def test_answer_xml_is_valid_and_escaped():
     assert stream.get("bidirectional") == "true" and stream.get("keepCallAlive") == "true"
     assert stream.get("contentType") == "audio/x-mulaw;rate=8000"
     assert stream.get("extraHeaders") == "callerPhone=919876543210"
+    # The call ends when our stream closes instead of re-fetching the answer URL.
+    assert [child.tag for child in root] == ["Stream", "Hangup"]
 
 
 def test_answer_url_requires_token(client):

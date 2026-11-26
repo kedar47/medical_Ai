@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     telephony_turn_queue_size: int = Field(default=4, ge=2, le=16)
     greeting_delay_ms: int = Field(default=1500, ge=0, le=10000)
     exotel_minimal_media: bool = True
+    # Plivo Audio Streaming. Runs alongside Exotel on its own routes; the
+    # token is the secret path segment of the answer URL and media WebSocket.
+    plivo_stream_token: str = ""
+    plivo_auth_id: str = ""  # Optional: reject streams from another Plivo account.
 
     voice_enabled: bool = True
     voice_session_ttl_minutes: int = Field(default=30, ge=1)

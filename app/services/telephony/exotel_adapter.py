@@ -20,6 +20,9 @@ class ExotelAdapter:
     def __init__(self, account_sid: str = ""):
         self.account_sid = account_sid
 
+    def normalize(self, packet: dict) -> dict:
+        return packet
+
     def start(self, packet: dict) -> tuple[str, str, str | None]:
         start = packet.get("start")
         if not isinstance(start, dict):

@@ -13,7 +13,7 @@ import threading
 import time
 import anyio
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -34,6 +34,7 @@ from app.services.telephony.call_manager import CallManager, TERMINAL
 from app.services.telephony.exotel_adapter import ExotelAdapter
 from app.services.telephony.exotel_client import outbound_config_issues
 from app.services.telephony.mock_adapter import MockAdapter
+from app.services.telephony.plivo_adapter import PlivoAdapter, answer_xml, caller_phone, remember_caller
 from app.services.telephony.schemas import MockIncoming
 from app.services.telephony.speech import speech_parts
 
@@ -146,6 +147,7 @@ def status(db=Depends(get_db)):
         "inbound_ready": configured and s.telephony_provider == "exotel" and bool(s.telephony_public_base_url),
         "outbound_ready": s.telephony_provider == "exotel" and not outbound_config_issues(s),
         "missing_configuration": outbound_config_issues(s) if s.telephony_provider == "exotel" else [],
+        "plivo_ready": bool(s.telephony_enabled and s.plivo_stream_token and s.telephony_public_base_url),
     }
 
 
@@ -201,41 +203,93 @@ def get_call_session_factory():
     return SessionLocal
 
 
+def _plivo_stream_url(s) -> str:
+    base = s.telephony_public_base_url.rstrip("/")
+    if base.startswith("https://"):
+        base = "wss://" + base[len("https://"):]
+    else:
+        base = "ws://" + base.removeprefix("http://")
+    return f"{base}/telephony/plivo/media/{s.plivo_stream_token}"
+
+
+@router.api_route("/plivo/answer/{token}", methods=["GET", "POST"])
+async def plivo_answer(token: str, request: Request):
+    """Plivo Answer URL: connect the call to the media WebSocket.
+
+    The secret path token plays the role of Exotel's stream password.
+    """
+    s = get_settings()
+    if not s.telephony_enabled or not s.telephony_public_base_url or not authorize(token, s.plivo_stream_token):
+        raise HTTPException(401, "Authentication required")
+    params = dict(request.query_params)
+    if request.method == "POST":
+        params.update({key: value for key, value in (await request.form()).items() if isinstance(value, str)})
+    call_uuid, raw_from = params.get("CallUUID"), params.get("From")
+    remember_caller(call_uuid, raw_from)
+    logger.info("telephony.plivo.answer call_ref=%s direction=%s phone_present=%s",
+                call_uuid, params.get("Direction"), bool(caller_phone(raw_from)))
+    return Response(answer_xml(_plivo_stream_url(s), caller_phone(raw_from)), media_type="application/xml")
+
+
 @router.websocket("/media")
 async def media(ws: WebSocket, factory=Depends(get_call_session_factory)):
+    await run_media(ws, factory, None)
+
+
+@router.websocket("/plivo/media/{token}")
+async def plivo_media(ws: WebSocket, token: str, factory=Depends(get_call_session_factory)):
+    await run_media(ws, factory, token)
+
+
+async def run_media(ws: WebSocket, factory, plivo_token):
     if not CALL_SLOT.acquire(blocking=False):
         await ws.close(code=1013)
         return
     try:
         # Shield cleanup from the ASGI request cancellation scope on disconnect.
         with anyio.CancelScope(shield=True):
-            await handle_media(ws, factory)
+            await handle_media(ws, factory, plivo_token)
     finally:
         CALL_SLOT.release()
 
 
-async def handle_media(ws: WebSocket, factory):
+async def handle_media(ws: WebSocket, factory, plivo_token=None):
     s = get_settings()
-    expected = "Basic " + base64.b64encode(f"{s.telephony_stream_username}:{s.telephony_stream_token}".encode()).decode()
     reasons = []
     if not s.telephony_enabled:
         reasons.append("disabled")
-    if not s.telephony_stream_username:
-        reasons.append("missing_stream_user")
-    if not s.telephony_stream_token:
-        reasons.append("missing_stream_token")
-    if s.telephony_provider == "exotel" and not s.exotel_account_sid:
-        reasons.append("missing_account_sid")
-    if not authorize(ws.headers.get("authorization"), expected):
-        reasons.append("auth_mismatch")
+    if plivo_token is not None:
+        # Plivo cannot send HTTP Basic auth; the secret path segment is checked.
+        provider = "plivo"
+        if not s.plivo_stream_token:
+            reasons.append("missing_plivo_token")
+        elif not authorize(plivo_token, s.plivo_stream_token):
+            reasons.append("auth_mismatch")
+    else:
+        provider = s.telephony_provider
+        expected = "Basic " + base64.b64encode(f"{s.telephony_stream_username}:{s.telephony_stream_token}".encode()).decode()
+        if not s.telephony_stream_username:
+            reasons.append("missing_stream_user")
+        if not s.telephony_stream_token:
+            reasons.append("missing_stream_token")
+        if s.telephony_provider == "exotel" and not s.exotel_account_sid:
+            reasons.append("missing_account_sid")
+        if not authorize(ws.headers.get("authorization"), expected):
+            reasons.append("auth_mismatch")
     if reasons:
-        logger.warning("telephony.media.rejected reasons=%s path=%s auth_present=%s",
-                       ",".join(reasons), ws.url.path, bool(ws.headers.get("authorization")))
+        # The Plivo path carries the token, so the path is never logged.
+        logger.warning("telephony.media.rejected provider=%s reasons=%s auth_present=%s",
+                       provider, ",".join(reasons), bool(ws.headers.get("authorization")))
         await ws.close(code=1008)
         return
-    logger.info("telephony.media.accepted path=%s sample_rate=%s",
-                ws.url.path, ws.query_params.get("sample-rate"))
-    adapter = ExotelAdapter(s.exotel_account_sid) if s.telephony_provider == "exotel" else MockAdapter()
+    logger.info("telephony.media.accepted provider=%s sample_rate=%s",
+                provider, ws.query_params.get("sample-rate"))
+    if provider == "plivo":
+        adapter = PlivoAdapter(s.plivo_auth_id)
+    elif provider == "exotel":
+        adapter = ExotelAdapter(s.exotel_account_sid)
+    else:
+        adapter = MockAdapter()
     await ws.accept()
     cancelled = threading.Event()
     call_id, stream = None, None
@@ -462,10 +516,14 @@ async def handle_media(ws: WebSocket, factory):
             packet = json.loads(raw)
             if not isinstance(packet, dict):
                 raise ValueError("Invalid packet")
-            event = packet.get("event")
             if time.monotonic() - started <= 2.0:
-                logger.info("telephony.media.raw_incoming event=%s raw=%s", event, raw)
+                logger.info("telephony.media.raw_incoming event=%s raw=%s", packet.get("event"), raw)
+            packet = adapter.normalize(packet)
+            event = packet.get("event")
             if event == "connected" and call_id is None:
+                continue
+            if event == "ignored":
+                logger.info("telephony.media.event_ignored reason=%s", packet.get("reason"))
                 continue
             if event == "start":
                 if call_id:
@@ -477,7 +535,7 @@ async def handle_media(ws: WebSocket, factory):
                             fmt.get("sample_rate"), fmt.get("channels"), fmt.get("bit_rate"))
                 reference, stream, phone = adapter.start(packet)
                 logger.info("telephony.media.start provider=%s call_ref=%s stream=%s phone_present=%s sample_rate=%s",
-                            s.telephony_provider, reference, stream, bool(phone),
+                            provider, reference, stream, bool(phone),
                             packet.get("start", {}).get("media_format", {}).get("sample_rate"))
                 intended_call_id = ws.query_params.get("bot_call_id")
                 if intended_call_id and not intended_call_id.startswith("call_"):
@@ -485,7 +543,7 @@ async def handle_media(ws: WebSocket, factory):
                 def begin():
                     with factory() as db:
                         service = CallManager(db)
-                        call = service.incoming(s.telephony_provider, reference, phone, intended_call_id=intended_call_id)
+                        call = service.incoming(provider, reference, phone, intended_call_id=intended_call_id)
                         service.claim(call.call_id, stream)
                         return call.call_id
                 call_id = await asyncio.to_thread(begin)

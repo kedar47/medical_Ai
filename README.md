@@ -1,5 +1,15 @@
 # AI-Powered Medicine Order Calling Agent — Phase 4 transport
 
+> **Speech-to-text:** calls use Sarvam AI (Whisper as backup). Setup in
+> [`docs/SARVAM_SETUP.md`](docs/SARVAM_SETUP.md); Claude Code instructions in
+> [`CLAUDE.md`](CLAUDE.md).
+>
+> **Phone calls:** the live demo number +91 22 6987 4610 runs on Plivo Audio
+> Streaming (`app/services/telephony/plivo_adapter.py`, routes
+> `/telephony/plivo/answer/{token}` and `/telephony/plivo/media/{token}`).
+> Exotel (`/telephony/media`) still works. Settings: `PLIVO_STREAM_TOKEN` in
+> `.env.example`. Secrets (`.env`) come from the project owner, never from git.
+
 ## React operator dashboard
 
 The complete local React dashboard is at **http://127.0.0.1:5173** with the API on
@@ -226,6 +236,9 @@ cp .env.example .env
 | `VOICE_MAX_TRANSCRIPT_CHARS` | Maximum accepted transcript length; default `1000` |
 | `VOICE_MAX_TURNS` | Maximum turns per voice session; default `100` |
 | `VOICE_MAX_TTS_CHARS` | Maximum characters synthesized per reply; default `600` |
+| `VOICE_STT_PROVIDER` | `sarvam` = Sarvam AI speech-to-text with Whisper backup; default `faster-whisper`. See `docs/SARVAM_SETUP.md` |
+| `SARVAM_API_KEY` | Sarvam key (private, from the project owner). Empty = Whisper only |
+| `SARVAM_STT_MODEL` / `SARVAM_STT_LANGUAGE` / `SARVAM_TIMEOUT_SECONDS` | Defaults `saarika:v2.5` / `unknown` / `8` |
 | `VOICE_STT_MODEL` | Faster-Whisper model name; default `small` |
 | `VOICE_STT_DEVICE` | STT device; default `cpu` |
 | `VOICE_STT_COMPUTE_TYPE` | STT compute type; default `int8` |
@@ -339,6 +352,11 @@ session. Schema creation is non-destructive through SQLAlchemy `create_all`; no
 Alembic migration tool is configured yet.
 
 ## 9. Demo Catalogue and Import
+
+> **Client demo (production):** the live demo uses `data/client_demo_medicines.csv`
+> (28 medicines from the client's list). Import it, then run
+> `python -m app.scripts.activate_only_csv data/client_demo_medicines.csv` to switch
+> every other medicine off. Sarvam setup: `docs/SARVAM_SETUP.md`.
 
 The demo CSV is at `data/demo_medicines.csv` and contains 20 verified records:
 
